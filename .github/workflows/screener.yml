@@ -1,9 +1,9 @@
-name: OKX RSI Screener
+name: Ladovka RSI Screener
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9,11,13,15,17,19,21 * * *"
+    - cron: "1 9,11,13,15,17,19,21 * * *"
       timezone: "Europe/Kyiv"
 
 jobs:
