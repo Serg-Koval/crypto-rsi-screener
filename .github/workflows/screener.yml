@@ -3,7 +3,7 @@ name: Ladovka RSI Screener
 on:
   workflow_dispatch:
   schedule:
-    - cron: "1 9,11,13,15,17,19,21 * * *"
+    - cron: "1,31 9-21 * * *"
       timezone: "Europe/Kyiv"
 
 jobs:
