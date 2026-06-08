@@ -1218,8 +1218,7 @@ def format_multi_provider_telegram(
 
     if not grouped_signals:
         lines.append("✅ Активних сигналів немає.")
-        return "
-".join(lines)
+        return "\n".join(lines)
 
     for idx, group in enumerate(grouped_signals):
         signal_label = telegram_signal_label(group["signal_level"])
@@ -1292,8 +1291,7 @@ def format_multi_provider_telegram(
             lines.append("────────────")
             lines.append("")
 
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # ============================================================
