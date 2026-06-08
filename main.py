@@ -12,55 +12,43 @@ from urllib3.util.retry import Retry
 
 
 # ============================================================
-# GLOBAL CONFIG
+# CONFIG
 # ============================================================
 
-BASE_URL = "https://www.okx.com"
-
-INST_TYPE = "SWAP"          # OKX perpetual contracts
-SETTLE_CCY = "USDT"         # USDT-margined perpetuals only
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 RSI_PERIOD = 14
 
-# Signal logic
 RSI_4H_ALERT = 80
 RSI_4H_EXTREME = 85
 RSI_1H_ALERT = 82
 
-# Prefilter:
-# price_change_24h >= 4%
-# AND volume_usd_24h_est >= 5M
 MIN_PRICE_CHANGE_24H = 4
 MIN_VOLUME_USD_24H = 5_000_000
 
-# Scanner limits
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 
-# More history for stable TradingView-like RSI
 CANDLE_LIMIT_1H = 500
 CANDLE_LIMIT_4H = 500
 
 REQUEST_DELAY_SECONDS = 0.15
 
-# Telegram
-TELEGRAM_ENABLED = True
 SEND_MESSAGE_IF_NO_SIGNALS = True
 
-# Timezone
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
+OKX_BASE_URL = "https://www.okx.com"
+OKX_INST_TYPE = "SWAP"
+OKX_SETTLE_CCY = "USDT"
 
-# Output controls
-DEBUG_SHOW_MARKET_SAMPLE = False
-DEBUG_SHOW_PREFILTERED_CANDIDATES = False
-VERBOSE_PROGRESS = False
+BITGET_BASE_URL = "https://api.bitget.com"
+BITGET_PRODUCT_TYPE = "usdt-futures"
 
 
 # ============================================================
-# HTTP SESSION WITH RETRY
+# HTTP SESSION
 # ============================================================
 
-def create_http_session():
+def create_session():
     session = requests.Session()
 
     retry_strategy = Retry(
@@ -70,7 +58,7 @@ def create_http_session():
         status=3,
         backoff_factor=0.8,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
+        allowed_methods=["GET", "POST"],
     )
 
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -79,171 +67,40 @@ def create_http_session():
     session.mount("http://", adapter)
 
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 crypto-rsi-screener/1.0"
+        "User-Agent": "multi-exchange-rsi-screener-test/1.0"
     })
 
     return session
 
 
-SESSION = create_http_session()
+SESSION = create_session()
 
 
 # ============================================================
-# SAFE REQUEST HELPER
+# COMMON HELPERS
 # ============================================================
 
-def safe_get_json(endpoint, params=None, show_debug=False):
+def safe_get_json(base_url, endpoint, params=None, provider_name="provider"):
     if params is None:
         params = {}
 
-    url = BASE_URL + endpoint
-
+    url = base_url + endpoint
     response = SESSION.get(url, params=params, timeout=20)
 
-    if show_debug:
-        print("=" * 100)
-        print("Request URL:", response.url)
-        print("Status code:", response.status_code)
-        print("Content-Type:", response.headers.get("Content-Type"))
-
     if response.status_code != 200:
-        print("HTTP error response:")
+        print(f"{provider_name} HTTP error:", response.status_code)
         print(response.text[:1000])
-        raise Exception(f"HTTP error: {response.status_code}")
+        raise Exception(f"{provider_name} HTTP error: {response.status_code}")
 
     try:
         data = response.json()
     except Exception as e:
-        print("JSON parse error.")
-        print("First 1000 characters of response:")
+        print(f"{provider_name} JSON parse error.")
         print(response.text[:1000])
         raise e
 
-    if data.get("code") != "0":
-        print("OKX API returned error:")
-        print(data)
-        raise Exception(f"OKX API error: {data.get('msg')}")
-
     return data
 
-
-# ============================================================
-# OKX API FUNCTIONS
-# ============================================================
-
-def get_all_instruments(inst_type=INST_TYPE):
-    endpoint = "/api/v5/public/instruments"
-    data = safe_get_json(endpoint, {"instType": inst_type})
-    return data["data"]
-
-
-def get_all_tickers(inst_type=INST_TYPE):
-    endpoint = "/api/v5/market/tickers"
-    data = safe_get_json(endpoint, {"instType": inst_type})
-    return data["data"]
-
-
-def get_candles(inst_id, bar, limit):
-    endpoint = "/api/v5/market/candles"
-
-    params = {
-        "instId": inst_id,
-        "bar": bar,
-        "limit": limit
-    }
-
-    data = safe_get_json(endpoint, params)
-    return data
-
-
-# ============================================================
-# DATAFRAME HELPERS
-# ============================================================
-
-def instruments_to_dataframe(instruments):
-    df = pd.DataFrame(instruments)
-
-    required_columns = ["instType", "settleCcy", "state", "instId"]
-
-    for col in required_columns:
-        if col not in df.columns:
-            raise Exception(f"Missing instrument column: {col}")
-
-    df = df[
-        (df["instType"] == INST_TYPE) &
-        (df["settleCcy"] == SETTLE_CCY) &
-        (df["state"] == "live") &
-        (df["instId"].str.endswith("-USDT-SWAP"))
-    ].copy()
-
-    return df.reset_index(drop=True)
-
-
-def tickers_to_dataframe(tickers):
-    df = pd.DataFrame(tickers)
-
-    numeric_columns = [
-        "last",
-        "open24h",
-        "high24h",
-        "low24h",
-        "vol24h",
-        "volCcy24h",
-        "volCcyQuote24h"
-    ]
-
-    for col in numeric_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "ts" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
-
-    return df
-
-
-def candles_to_dataframe(raw_candles):
-    rows = raw_candles["data"]
-
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "volume_currency",
-            "quote_volume",
-            "confirm"
-        ]
-    )
-
-    numeric_columns = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "volume_currency",
-        "quote_volume"
-    ]
-
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["timestamp"] = pd.to_datetime(df["timestamp"].astype("int64"), unit="ms")
-    df["confirm"] = df["confirm"].astype(int)
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    return df
-
-
-# ============================================================
-# TRADINGVIEW-COMPATIBLE RSI
-# ============================================================
 
 def calculate_wilder_rma(series, period):
     values = series.astype(float).to_numpy()
@@ -291,7 +148,6 @@ def calculate_rsi(df, period=RSI_PERIOD):
     avg_loss = calculate_wilder_rma(loss, period)
 
     rs = avg_gain / avg_loss
-
     rsi = 100 - (100 / (1 + rs))
 
     rsi = rsi.where(avg_loss != 0, 100)
@@ -301,50 +157,6 @@ def calculate_rsi(df, period=RSI_PERIOD):
 
     return df
 
-
-# ============================================================
-# INDICATOR HELPERS
-# ============================================================
-
-def get_last_closed_candle(df):
-    closed_df = df[df["confirm"] == 1].copy()
-
-    if closed_df.empty:
-        raise Exception("No closed candles found.")
-
-    return closed_df.iloc[-1]
-
-
-def calculate_closed_24h_quote_volume_from_1h(df_1h):
-    closed_df = df_1h[df_1h["confirm"] == 1].copy()
-
-    if len(closed_df) < 24:
-        return None
-
-    return float(closed_df.tail(24)["quote_volume"].sum())
-
-
-def calculate_volume_change_24h_from_1h(df_1h):
-    closed_df = df_1h[df_1h["confirm"] == 1].copy()
-
-    if len(closed_df) < 48:
-        return None
-
-    prev_24 = closed_df.iloc[-48:-24]
-    last_24 = closed_df.iloc[-24:]
-
-    prev_volume = prev_24["quote_volume"].sum()
-    last_volume = last_24["quote_volume"].sum()
-
-    if prev_volume == 0:
-        return None
-
-    return float(((last_volume - prev_volume) / prev_volume) * 100)
-
-
-# ============================================================
-# FORMATTING HELPERS
-# ============================================================
 
 def format_large_number(value):
     if value is None or pd.isna(value):
@@ -399,71 +211,244 @@ def parse_float_from_value(value):
         return None
 
 
-def make_report_symbol(inst_id):
-    symbol = inst_id.replace("-SWAP", "")
-    symbol = symbol.replace("-", "")
-    symbol = symbol + ".P"
+def classify_signal(rsi_1h, rsi_4h, exact_volume_24h, price_change_24h):
+    volume_ok = (
+        exact_volume_24h is not None and
+        exact_volume_24h >= MIN_VOLUME_USD_24H
+    )
 
-    return symbol
+    price_change_ok = price_change_24h >= MIN_PRICE_CHANGE_24H
+
+    if not volume_ok or not price_change_ok:
+        return {
+            "signal_level": "NO_SIGNAL",
+            "reason": "Filters not passed"
+        }
+
+    rsi_4h_condition = rsi_4h > RSI_4H_ALERT
+    rsi_4h_extreme_condition = rsi_4h > RSI_4H_EXTREME
+    rsi_1h_condition = rsi_1h > RSI_1H_ALERT
+    combined_condition = rsi_4h_condition and rsi_1h_condition
+
+    if combined_condition:
+        return {
+            "signal_level": "COMBINED_OVERHEAT",
+            "reason": f"RSI 1H > {RSI_1H_ALERT} and RSI 4H > {RSI_4H_ALERT}"
+        }
+
+    if rsi_4h_extreme_condition:
+        return {
+            "signal_level": "EXTREME_4H",
+            "reason": f"RSI 4H > {RSI_4H_EXTREME}"
+        }
+
+    if rsi_4h_condition:
+        return {
+            "signal_level": "STRONG_4H",
+            "reason": f"RSI 4H > {RSI_4H_ALERT}"
+        }
+
+    if rsi_1h_condition:
+        return {
+            "signal_level": "EXTREME_1H",
+            "reason": f"RSI 1H > {RSI_1H_ALERT}"
+        }
+
+    return {
+        "signal_level": "NO_SIGNAL",
+        "reason": "RSI filters not passed"
+    }
 
 
-def print_df(df, title=None, max_rows=50):
-    if title:
-        print("\n" + "=" * 120)
-        print(title)
-        print("=" * 120)
+def get_signal_rank(signal_level):
+    ranks = {
+        "COMBINED_OVERHEAT": 4,
+        "EXTREME_4H": 3,
+        "STRONG_4H": 2,
+        "EXTREME_1H": 1,
+        "NO_SIGNAL": 0,
+    }
 
-    if df is None or df.empty:
-        print("Empty table.")
-        return
-
-    print(df.head(max_rows).to_string(index=False))
+    return ranks.get(signal_level, 0)
 
 
-def prepare_active_output_table(df_active):
-    if df_active is None or df_active.empty:
-        return df_active
+# ============================================================
+# OKX PROVIDER
+# ============================================================
 
-    df_out = df_active.copy()
+def okx_get_all_instruments():
+    data = safe_get_json(
+        base_url=OKX_BASE_URL,
+        endpoint="/api/v5/public/instruments",
+        params={"instType": OKX_INST_TYPE},
+        provider_name="OKX",
+    )
 
-    df_out["price"] = df_out["price"].apply(format_price_2)
-    df_out["rsi_1h"] = df_out["rsi_1h"].round(2)
-    df_out["rsi_4h"] = df_out["rsi_4h"].round(2)
-    df_out["chg_24h_%"] = df_out["price_change_24h_percent"].apply(format_percent_2)
-    df_out["vol_24h"] = df_out["volume_usd_24h_exact"].apply(format_large_number)
-    df_out["vol_chg_24h_%"] = df_out["volume_change_24h_percent"].apply(format_percent_2)
+    if data.get("code") != "0":
+        raise Exception(f"OKX API error: {data.get('msg')}")
 
-    columns = [
-        "signal_level",
-        "symbol",
-        "price",
-        "rsi_1h",
-        "rsi_4h",
-        "chg_24h_%",
-        "vol_24h",
-        "vol_chg_24h_%",
-        "reason"
+    return data["data"]
+
+
+def okx_get_all_tickers():
+    data = safe_get_json(
+        base_url=OKX_BASE_URL,
+        endpoint="/api/v5/market/tickers",
+        params={"instType": OKX_INST_TYPE},
+        provider_name="OKX",
+    )
+
+    if data.get("code") != "0":
+        raise Exception(f"OKX API error: {data.get('msg')}")
+
+    return data["data"]
+
+
+def okx_get_candles(inst_id, bar, limit):
+    data = safe_get_json(
+        base_url=OKX_BASE_URL,
+        endpoint="/api/v5/market/candles",
+        params={
+            "instId": inst_id,
+            "bar": bar,
+            "limit": limit,
+        },
+        provider_name="OKX",
+    )
+
+    if data.get("code") != "0":
+        raise Exception(f"OKX API error: {data.get('msg')}")
+
+    return data
+
+
+def okx_instruments_to_dataframe(instruments):
+    df = pd.DataFrame(instruments)
+
+    df = df[
+        (df["instType"] == OKX_INST_TYPE)
+        & (df["settleCcy"] == OKX_SETTLE_CCY)
+        & (df["state"] == "live")
+        & (df["instId"].str.endswith("-USDT-SWAP"))
+    ].copy()
+
+    return df.reset_index(drop=True)
+
+
+def okx_tickers_to_dataframe(tickers):
+    df = pd.DataFrame(tickers)
+
+    numeric_columns = [
+        "last",
+        "open24h",
+        "high24h",
+        "low24h",
+        "vol24h",
+        "volCcy24h",
+        "volCcyQuote24h",
     ]
 
-    return df_out[columns]
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "ts" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
+
+    return df
 
 
-# ============================================================
-# SCREENER LOGIC
-# ============================================================
+def okx_candles_to_dataframe(raw_candles):
+    rows = raw_candles["data"]
 
-def build_market_universe():
-    instruments = get_all_instruments(inst_type=INST_TYPE)
-    df_instruments = instruments_to_dataframe(instruments)
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "volume_currency",
+            "quote_volume",
+            "confirm",
+        ],
+    )
 
-    tickers = get_all_tickers(inst_type=INST_TYPE)
-    df_tickers = tickers_to_dataframe(tickers)
+    numeric_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "volume_currency",
+        "quote_volume",
+    ]
+
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"].astype("int64"), unit="ms")
+    df["confirm"] = df["confirm"].astype(int)
+
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df
+
+
+def okx_get_last_closed_candle(df):
+    closed_df = df[df["confirm"] == 1].copy()
+
+    if closed_df.empty:
+        raise Exception("OKX: no closed candles found.")
+
+    return closed_df.iloc[-1]
+
+
+def okx_closed_24h_quote_volume(df_1h):
+    closed_df = df_1h[df_1h["confirm"] == 1].copy()
+
+    if len(closed_df) < 24:
+        return None
+
+    return float(closed_df.tail(24)["quote_volume"].sum())
+
+
+def okx_volume_change_24h(df_1h):
+    closed_df = df_1h[df_1h["confirm"] == 1].copy()
+
+    if len(closed_df) < 48:
+        return None
+
+    prev_24 = closed_df.iloc[-48:-24]
+    last_24 = closed_df.iloc[-24:]
+
+    prev_volume = prev_24["quote_volume"].sum()
+    last_volume = last_24["quote_volume"].sum()
+
+    if prev_volume == 0:
+        return None
+
+    return float(((last_volume - prev_volume) / prev_volume) * 100)
+
+
+def okx_make_report_symbol(inst_id):
+    return inst_id.replace("-SWAP", "").replace("-", "") + ".P"
+
+
+def okx_build_market_universe():
+    instruments = okx_get_all_instruments()
+    df_instruments = okx_instruments_to_dataframe(instruments)
+
+    tickers = okx_get_all_tickers()
+    df_tickers = okx_tickers_to_dataframe(tickers)
 
     df = df_instruments.merge(
         df_tickers,
         on="instId",
         how="inner",
-        suffixes=("_instrument", "_ticker")
+        suffixes=("_instrument", "_ticker"),
     )
 
     df["price_change_24h_percent"] = (
@@ -480,114 +465,43 @@ def build_market_universe():
             "last",
             "open24h",
             "price_change_24h_percent",
-            "volume_usd_24h_est"
+            "volume_usd_24h_est",
         ]
     ).copy()
 
     return df
 
 
-def prefilter_candidates(df_market):
+def okx_prefilter_candidates(df_market):
     df = df_market.copy()
 
     df = df[
-        (df["price_change_24h_percent"] >= MIN_PRICE_CHANGE_24H) &
-        (df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H)
+        (df["price_change_24h_percent"] >= MIN_PRICE_CHANGE_24H)
+        & (df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H)
     ].copy()
 
     df = df.sort_values(
-        by=[
-            "price_change_24h_percent",
-            "volume_usd_24h_est"
-        ],
-        ascending=[
-            False,
-            False
-        ]
+        by=["price_change_24h_percent", "volume_usd_24h_est"],
+        ascending=[False, False],
     ).reset_index(drop=True)
 
     return df.head(PRE_FILTER_TOP_N)
 
 
-def classify_signal(rsi_1h, rsi_4h, exact_volume_24h, price_change_24h):
-    volume_ok = (
-        exact_volume_24h is not None and
-        exact_volume_24h >= MIN_VOLUME_USD_24H
-    )
-
-    price_change_ok = price_change_24h >= MIN_PRICE_CHANGE_24H
-
-    if not volume_ok or not price_change_ok:
-        return {
-            "signal_level": "NO_SIGNAL",
-            "volume_condition": volume_ok,
-            "price_change_condition": price_change_ok,
-            "rsi_4h_condition": False,
-            "rsi_1h_condition": False,
-            "combined_condition": False,
-            "reason": "Filters not passed"
-        }
-
-    rsi_4h_condition = rsi_4h > RSI_4H_ALERT
-    rsi_4h_extreme_condition = rsi_4h > RSI_4H_EXTREME
-    rsi_1h_condition = rsi_1h > RSI_1H_ALERT
-    combined_condition = rsi_4h_condition and rsi_1h_condition
-
-    if combined_condition:
-        signal_level = "COMBINED_OVERHEAT"
-        reason = f"RSI 1H > {RSI_1H_ALERT} and RSI 4H > {RSI_4H_ALERT}"
-
-    elif rsi_4h_extreme_condition:
-        signal_level = "EXTREME_4H"
-        reason = f"RSI 4H > {RSI_4H_EXTREME}"
-
-    elif rsi_4h_condition:
-        signal_level = "STRONG_4H"
-        reason = f"RSI 4H > {RSI_4H_ALERT}"
-
-    elif rsi_1h_condition:
-        signal_level = "EXTREME_1H"
-        reason = f"RSI 1H > {RSI_1H_ALERT}"
-
-    else:
-        signal_level = "NO_SIGNAL"
-        reason = "RSI filters not passed"
-
-    return {
-        "signal_level": signal_level,
-        "volume_condition": volume_ok,
-        "price_change_condition": price_change_ok,
-        "rsi_4h_condition": rsi_4h_condition,
-        "rsi_1h_condition": rsi_1h_condition,
-        "combined_condition": combined_condition,
-        "reason": reason
-    }
-
-
-def analyze_candidate(inst_id, ticker_row):
-    raw_1h = get_candles(
-        inst_id=inst_id,
-        bar="1H",
-        limit=CANDLE_LIMIT_1H
-    )
-
-    df_1h = candles_to_dataframe(raw_1h)
+def okx_analyze_candidate(inst_id, ticker_row):
+    raw_1h = okx_get_candles(inst_id=inst_id, bar="1H", limit=CANDLE_LIMIT_1H)
+    df_1h = okx_candles_to_dataframe(raw_1h)
     df_1h = calculate_rsi(df_1h, period=RSI_PERIOD)
 
-    raw_4h = get_candles(
-        inst_id=inst_id,
-        bar="4H",
-        limit=CANDLE_LIMIT_4H
-    )
-
-    df_4h = candles_to_dataframe(raw_4h)
+    raw_4h = okx_get_candles(inst_id=inst_id, bar="4H", limit=CANDLE_LIMIT_4H)
+    df_4h = okx_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
-    last_1h = get_last_closed_candle(df_1h)
-    last_4h = get_last_closed_candle(df_4h)
+    last_1h = okx_get_last_closed_candle(df_1h)
+    last_4h = okx_get_last_closed_candle(df_4h)
 
-    exact_volume_24h = calculate_closed_24h_quote_volume_from_1h(df_1h)
-    volume_change_24h = calculate_volume_change_24h_from_1h(df_1h)
+    exact_volume_24h = okx_closed_24h_quote_volume(df_1h)
+    volume_change_24h = okx_volume_change_24h(df_1h)
 
     rsi_1h = float(last_1h["rsi"])
     rsi_4h = float(last_4h["rsi"])
@@ -598,60 +512,50 @@ def analyze_candidate(inst_id, ticker_row):
         rsi_1h=rsi_1h,
         rsi_4h=rsi_4h,
         exact_volume_24h=exact_volume_24h,
-        price_change_24h=price_change_24h
+        price_change_24h=price_change_24h,
     )
 
     return {
-        "inst_id": inst_id,
-        "symbol": make_report_symbol(inst_id),
+        "exchange": "OKX",
+        "provider": "OKX",
+        "raw_symbol": inst_id,
+        "symbol": okx_make_report_symbol(inst_id),
         "price": price,
-
         "rsi_1h": rsi_1h,
         "rsi_4h": rsi_4h,
-
-        "last_1h_candle_time": last_1h["timestamp"],
-        "last_4h_candle_time": last_4h["timestamp"],
-
-        "volume_usd_24h_est": float(ticker_row["volume_usd_24h_est"]),
         "volume_usd_24h_exact": exact_volume_24h,
         "volume_change_24h_percent": volume_change_24h,
-
         "price_change_24h_percent": price_change_24h,
-
-        "volume_condition": classification["volume_condition"],
-        "price_change_condition": classification["price_change_condition"],
-        "rsi_4h_condition": classification["rsi_4h_condition"],
-        "rsi_1h_condition": classification["rsi_1h_condition"],
-        "combined_condition": classification["combined_condition"],
-
         "signal_level": classification["signal_level"],
-        "reason": classification["reason"]
+        "reason": classification["reason"],
     }
 
 
-def run_screener():
-    print("Loading OKX market universe...")
+def run_okx_screener():
+    print("\n" + "=" * 120)
+    print("RUNNING OKX PROVIDER")
+    print("=" * 120)
 
-    df_market = build_market_universe()
+    df_market = okx_build_market_universe()
     total_universe_count = len(df_market)
 
-    df_candidates = prefilter_candidates(df_market)
+    df_candidates = okx_prefilter_candidates(df_market)
     prefiltered_count = len(df_candidates)
+
+    print("OKX total universe:", total_universe_count)
+    print("OKX prefiltered:", prefiltered_count)
 
     results = []
 
     for index, row in df_candidates.iterrows():
         inst_id = row["instId"]
 
-        if VERBOSE_PROGRESS:
-            print(f"[{index + 1}/{len(df_candidates)}] Analyzing {inst_id}...")
-
         try:
-            result = analyze_candidate(inst_id, row)
+            result = okx_analyze_candidate(inst_id, row)
             results.append(result)
 
         except Exception as e:
-            print(f"Error while analyzing {inst_id}: {e}")
+            print(f"OKX error while analyzing {inst_id}: {e}")
 
         time.sleep(REQUEST_DELAY_SECONDS)
 
@@ -660,32 +564,7 @@ def run_screener():
     if df_results.empty:
         return df_results, total_universe_count, prefiltered_count, 0
 
-    signal_rank = {
-        "COMBINED_OVERHEAT": 4,
-        "EXTREME_4H": 3,
-        "STRONG_4H": 2,
-        "EXTREME_1H": 1,
-        "NO_SIGNAL": 0
-    }
-
-    df_results["signal_rank"] = df_results["signal_level"].map(signal_rank)
-
-    df_results = df_results.sort_values(
-        by=[
-            "signal_rank",
-            "rsi_4h",
-            "rsi_1h",
-            "price_change_24h_percent",
-            "volume_usd_24h_exact"
-        ],
-        ascending=[
-            False,
-            False,
-            False,
-            False,
-            False
-        ]
-    ).reset_index(drop=True)
+    df_results["signal_rank"] = df_results["signal_level"].apply(get_signal_rank)
 
     active_count = len(df_results[df_results["signal_level"] != "NO_SIGNAL"])
 
@@ -693,28 +572,352 @@ def run_screener():
 
 
 # ============================================================
-# TELEGRAM FUNCTIONS
+# BITGET PROVIDER
+# ============================================================
+
+def bitget_success(data):
+    return str(data.get("code")) == "00000"
+
+
+def bitget_get_contracts():
+    data = safe_get_json(
+        base_url=BITGET_BASE_URL,
+        endpoint="/api/v2/mix/market/contracts",
+        params={"productType": BITGET_PRODUCT_TYPE},
+        provider_name="Bitget",
+    )
+
+    if not bitget_success(data):
+        raise Exception(f"Bitget API error: {data.get('msg')}")
+
+    return data["data"]
+
+
+def bitget_get_tickers():
+    data = safe_get_json(
+        base_url=BITGET_BASE_URL,
+        endpoint="/api/v2/mix/market/tickers",
+        params={"productType": BITGET_PRODUCT_TYPE},
+        provider_name="Bitget",
+    )
+
+    if not bitget_success(data):
+        raise Exception(f"Bitget API error: {data.get('msg')}")
+
+    return data["data"]
+
+
+def bitget_get_candles(symbol, granularity, limit):
+    data = safe_get_json(
+        base_url=BITGET_BASE_URL,
+        endpoint="/api/v2/mix/market/candles",
+        params={
+            "productType": BITGET_PRODUCT_TYPE,
+            "symbol": symbol,
+            "granularity": granularity,
+            "limit": str(limit),
+        },
+        provider_name="Bitget",
+    )
+
+    if not bitget_success(data):
+        raise Exception(f"Bitget API error: {data.get('msg')}")
+
+    return data["data"]
+
+
+def bitget_contracts_to_dataframe(contracts):
+    df = pd.DataFrame(contracts)
+
+    if df.empty:
+        return df
+
+    if "symbol" not in df.columns:
+        raise Exception("Bitget contracts response has no symbol column.")
+
+    df["symbol"] = df["symbol"].astype(str)
+
+    return df.reset_index(drop=True)
+
+
+def bitget_normalize_change(value):
+    if value is None or pd.isna(value):
+        return np.nan
+
+    value = float(value)
+
+    # Bitget can return change as ratio, e.g. 0.12 = 12%.
+    if abs(value) <= 2:
+        return value * 100
+
+    return value
+
+
+def bitget_tickers_to_dataframe(tickers):
+    df = pd.DataFrame(tickers)
+
+    if df.empty:
+        return df
+
+    if "symbol" not in df.columns:
+        raise Exception("Bitget tickers response has no symbol column.")
+
+    numeric_cols = [
+        "lastPr",
+        "last",
+        "open24h",
+        "high24h",
+        "low24h",
+        "change24h",
+        "priceChangePercent",
+        "baseVolume",
+        "quoteVolume",
+        "usdtVolume",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "lastPr" in df.columns:
+        df["price"] = df["lastPr"]
+    elif "last" in df.columns:
+        df["price"] = df["last"]
+    else:
+        raise Exception("Bitget: no price column found.")
+
+    if "change24h" in df.columns:
+        df["price_change_24h_percent"] = df["change24h"].apply(bitget_normalize_change)
+    elif "priceChangePercent" in df.columns:
+        df["price_change_24h_percent"] = df["priceChangePercent"].apply(bitget_normalize_change)
+    elif "open24h" in df.columns:
+        df["price_change_24h_percent"] = ((df["price"] - df["open24h"]) / df["open24h"]) * 100
+    else:
+        df["price_change_24h_percent"] = np.nan
+
+    if "usdtVolume" in df.columns:
+        df["volume_usd_24h_est"] = df["usdtVolume"]
+    elif "quoteVolume" in df.columns:
+        df["volume_usd_24h_est"] = df["quoteVolume"]
+    elif "baseVolume" in df.columns:
+        df["volume_usd_24h_est"] = df["baseVolume"] * df["price"]
+    else:
+        df["volume_usd_24h_est"] = np.nan
+
+    return df
+
+
+def bitget_candles_to_dataframe(rows):
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    if df.shape[1] < 6:
+        raise Exception(f"Bitget: unexpected candle format. Columns: {df.shape[1]}")
+
+    columns = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "base_volume",
+        "quote_volume",
+    ]
+
+    df = df.iloc[:, : min(df.shape[1], len(columns))]
+    df.columns = columns[: df.shape[1]]
+
+    for col in ["open", "high", "low", "close", "base_volume", "quote_volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"].astype("int64"), unit="ms")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df
+
+
+def bitget_get_last_closed_candle(df):
+    # Bitget does not provide OKX-style confirm field.
+    # Use previous candle as safer closed candle.
+    if df is None or df.empty:
+        raise Exception("Bitget: empty candles dataframe.")
+
+    if len(df) >= 2:
+        return df.iloc[-2]
+
+    return df.iloc[-1]
+
+
+def bitget_closed_24h_quote_volume(df_1h):
+    if df_1h is None or df_1h.empty or "quote_volume" not in df_1h.columns:
+        return None
+
+    closed_df = df_1h.iloc[:-1].copy()
+
+    if len(closed_df) < 24:
+        return None
+
+    return float(closed_df.tail(24)["quote_volume"].sum())
+
+
+def bitget_volume_change_24h(df_1h):
+    if df_1h is None or df_1h.empty or "quote_volume" not in df_1h.columns:
+        return None
+
+    closed_df = df_1h.iloc[:-1].copy()
+
+    if len(closed_df) < 48:
+        return None
+
+    prev_24 = closed_df.iloc[-48:-24]["quote_volume"].sum()
+    last_24 = closed_df.iloc[-24:]["quote_volume"].sum()
+
+    if prev_24 == 0:
+        return None
+
+    return float(((last_24 - prev_24) / prev_24) * 100)
+
+
+def bitget_build_market_universe():
+    contracts = bitget_get_contracts()
+    tickers = bitget_get_tickers()
+
+    df_contracts = bitget_contracts_to_dataframe(contracts)
+    df_tickers = bitget_tickers_to_dataframe(tickers)
+
+    df = df_contracts.merge(
+        df_tickers,
+        on="symbol",
+        how="inner",
+        suffixes=("_contract", "_ticker"),
+    )
+
+    df = df.dropna(
+        subset=[
+            "price",
+            "price_change_24h_percent",
+            "volume_usd_24h_est",
+        ]
+    ).copy()
+
+    return df
+
+
+def bitget_prefilter_candidates(df_market):
+    df = df_market.copy()
+
+    df = df[
+        (df["price_change_24h_percent"] >= MIN_PRICE_CHANGE_24H)
+        & (df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H)
+    ].copy()
+
+    df = df.sort_values(
+        by=["price_change_24h_percent", "volume_usd_24h_est"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+    return df.head(PRE_FILTER_TOP_N)
+
+
+def bitget_analyze_candidate(symbol, ticker_row):
+    raw_1h = bitget_get_candles(symbol=symbol, granularity="1H", limit=CANDLE_LIMIT_1H)
+    df_1h = bitget_candles_to_dataframe(raw_1h)
+    df_1h = calculate_rsi(df_1h, period=RSI_PERIOD)
+
+    raw_4h = bitget_get_candles(symbol=symbol, granularity="4H", limit=CANDLE_LIMIT_4H)
+    df_4h = bitget_candles_to_dataframe(raw_4h)
+    df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
+
+    last_1h = bitget_get_last_closed_candle(df_1h)
+    last_4h = bitget_get_last_closed_candle(df_4h)
+
+    exact_volume_24h = bitget_closed_24h_quote_volume(df_1h)
+    volume_change_24h = bitget_volume_change_24h(df_1h)
+
+    rsi_1h = float(last_1h["rsi"])
+    rsi_4h = float(last_4h["rsi"])
+    price = float(last_1h["close"])
+    price_change_24h = float(ticker_row["price_change_24h_percent"])
+
+    classification = classify_signal(
+        rsi_1h=rsi_1h,
+        rsi_4h=rsi_4h,
+        exact_volume_24h=exact_volume_24h,
+        price_change_24h=price_change_24h,
+    )
+
+    return {
+        "exchange": "Bitget",
+        "provider": "Bitget",
+        "raw_symbol": symbol,
+        "symbol": f"{symbol}.P",
+        "price": price,
+        "rsi_1h": rsi_1h,
+        "rsi_4h": rsi_4h,
+        "volume_usd_24h_exact": exact_volume_24h,
+        "volume_change_24h_percent": volume_change_24h,
+        "price_change_24h_percent": price_change_24h,
+        "signal_level": classification["signal_level"],
+        "reason": classification["reason"],
+    }
+
+
+def run_bitget_screener():
+    print("\n" + "=" * 120)
+    print("RUNNING BITGET PROVIDER")
+    print("=" * 120)
+
+    df_market = bitget_build_market_universe()
+    total_universe_count = len(df_market)
+
+    df_candidates = bitget_prefilter_candidates(df_market)
+    prefiltered_count = len(df_candidates)
+
+    print("Bitget total universe:", total_universe_count)
+    print("Bitget prefiltered:", prefiltered_count)
+
+    results = []
+
+    for index, row in df_candidates.iterrows():
+        symbol = row["symbol"]
+
+        try:
+            result = bitget_analyze_candidate(symbol, row)
+            results.append(result)
+
+        except Exception as e:
+            print(f"Bitget error while analyzing {symbol}: {e}")
+
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    df_results = pd.DataFrame(results)
+
+    if df_results.empty:
+        return df_results, total_universe_count, prefiltered_count, 0
+
+    df_results["signal_rank"] = df_results["signal_level"].apply(get_signal_rank)
+
+    active_count = len(df_results[df_results["signal_level"] != "NO_SIGNAL"])
+
+    return df_results, total_universe_count, prefiltered_count, active_count
+
+
+# ============================================================
+# TELEGRAM
 # ============================================================
 
 def get_telegram_credentials():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-    return bot_token, chat_id
-
-
-def validate_telegram_config():
-    if not TELEGRAM_ENABLED:
-        print("Telegram disabled.")
-        return None, None
-
-    bot_token, chat_id = get_telegram_credentials()
-
     if not bot_token:
-        raise Exception("TELEGRAM_BOT_TOKEN is missing. Add it to GitHub Secrets.")
+        raise Exception("TELEGRAM_BOT_TOKEN is missing.")
 
     if not chat_id:
-        raise Exception("TELEGRAM_CHAT_ID is missing. Add it to GitHub Secrets.")
+        raise Exception("TELEGRAM_CHAT_ID is missing.")
 
     return bot_token, chat_id
 
@@ -725,7 +928,7 @@ def telegram_signal_label(signal_level):
         "EXTREME_4H": "🔴 EXTREME 4H",
         "STRONG_4H": "🟠 STRONG 4H",
         "EXTREME_1H": "🟡 EXTREME 1H",
-        "NO_SIGNAL": "⚪ NO SIGNAL"
+        "NO_SIGNAL": "⚪ NO SIGNAL",
     }
 
     return labels.get(signal_level, signal_level)
@@ -749,32 +952,6 @@ def telegram_signal_badges(row):
     return badges
 
 
-def send_telegram_message(text):
-    if not TELEGRAM_ENABLED:
-        print("Telegram disabled.")
-        return
-
-    bot_token, chat_id = validate_telegram_config()
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-
-    response = SESSION.post(url, json=payload, timeout=20)
-
-    if response.status_code != 200:
-        print("Telegram error response:")
-        print(response.text)
-        raise Exception(f"Telegram sendMessage error: {response.status_code}")
-
-    print("Telegram message sent.")
-
-
 def split_long_message(text, max_length=3900):
     if len(text) <= max_length:
         return [text]
@@ -795,58 +972,289 @@ def split_long_message(text, max_length=3900):
     return parts
 
 
+def send_telegram_message(text):
+    bot_token, chat_id = get_telegram_credentials()
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    response = SESSION.post(url, json=payload, timeout=20)
+
+    if response.status_code != 200:
+        print("Telegram error response:")
+        print(response.text)
+        raise Exception(f"Telegram sendMessage error: {response.status_code}")
+
+    print("Telegram message sent.")
+
+
 def send_telegram_message_safe(text):
-    parts = split_long_message(text)
+    for index, part in enumerate(split_long_message(text)):
+        if index > 0:
+            part = f"Part {index + 1}\n\n" + part
 
-    for index, part in enumerate(parts):
-        if len(parts) > 1:
-            header = f"Part {index + 1}/{len(parts)}\n\n"
-            send_telegram_message(header + part)
-        else:
-            send_telegram_message(part)
-
+        send_telegram_message(part)
         time.sleep(1)
 
 
-def format_active_signals_for_telegram(
-    df_active_output,
-    total_universe_count,
-    prefiltered_count,
-    active_count
+def prepare_active_output_table(df_active):
+    if df_active is None or df_active.empty:
+        return pd.DataFrame()
+
+    df_out = df_active.copy()
+
+    df_out["price"] = df_out["price"].apply(format_price_2)
+    df_out["rsi_1h"] = df_out["rsi_1h"].round(2)
+    df_out["rsi_4h"] = df_out["rsi_4h"].round(2)
+    df_out["chg_24h_%"] = df_out["price_change_24h_percent"].apply(format_percent_2)
+    df_out["vol_24h"] = df_out["volume_usd_24h_exact"].apply(format_large_number)
+    df_out["vol_chg_24h_%"] = df_out["volume_change_24h_percent"].apply(format_percent_2)
+
+    columns = [
+        "exchange",
+        "signal_level",
+        "symbol",
+        "price",
+        "rsi_1h",
+        "rsi_4h",
+        "chg_24h_%",
+        "vol_24h",
+        "vol_chg_24h_%",
+        "reason",
+    ]
+
+    return df_out[columns]
+
+
+def exchange_sort_key(exchange):
+    order = {
+        "OKX": 1,
+        "Bitget": 2,
+    }
+
+    return order.get(str(exchange), 99)
+
+
+def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
+    """
+    Групує активні сигнали по symbol.
+
+    Навіщо:
+    - якщо BEATUSDT.P є і на OKX, і на Bitget, Telegram покаже його один раз;
+    - всередині одного блоку буде видно всі біржі;
+    - ранжування береться за найсильнішим сигналом серед бірж.
+    """
+
+    if df_active is None or df_active.empty:
+        return []
+
+    df = df_active.copy()
+    df["signal_rank"] = df["signal_level"].apply(get_signal_rank)
+    df["sort_volume"] = df["volume_usd_24h_exact"].fillna(0)
+    df["sort_vol_chg"] = df["volume_change_24h_percent"].fillna(-999999)
+
+    groups = []
+
+    for symbol, group in df.groupby("symbol", sort=False):
+        group_sorted = group.sort_values(
+            by=[
+                "signal_rank",
+                "rsi_4h",
+                "rsi_1h",
+                "price_change_24h_percent",
+                "sort_volume",
+            ],
+            ascending=[False, False, False, False, False],
+        ).reset_index(drop=True)
+
+        top_row = group_sorted.iloc[0]
+
+        exchanges = sorted(
+            group_sorted["exchange"].dropna().astype(str).unique().tolist(),
+            key=exchange_sort_key,
+        )
+
+        details = []
+
+        group_by_exchange = group_sorted.sort_values(
+            by=["exchange", "signal_rank"],
+            ascending=[True, False],
+        )
+
+        for _, row in group_by_exchange.iterrows():
+            details.append({
+                "exchange": str(row["exchange"]),
+                "signal_level": str(row["signal_level"]),
+                "reason": str(row["reason"]),
+                "price": format_price_2(row["price"]),
+                "rsi_1h": f"{float(row['rsi_1h']):.2f}",
+                "rsi_4h": f"{float(row['rsi_4h']):.2f}",
+                "chg_24h_%": format_percent_2(row["price_change_24h_percent"]),
+                "vol_24h": format_large_number(row["volume_usd_24h_exact"]),
+                "vol_chg_24h_%": format_percent_2(row["volume_change_24h_percent"]),
+            })
+
+        unique_reasons = []
+
+        for reason in group_sorted["reason"].astype(str).tolist():
+            if reason not in unique_reasons:
+                unique_reasons.append(reason)
+
+        max_price_change = group_sorted["price_change_24h_percent"].max()
+        max_volume_change = group_sorted["volume_change_24h_percent"].max()
+        max_volume = group_sorted["volume_usd_24h_exact"].max()
+
+        groups.append({
+            "symbol": str(symbol),
+            "signal_level": str(top_row["signal_level"]),
+            "signal_rank": int(top_row["signal_rank"]),
+            "reason": str(top_row["reason"]),
+            "reasons": unique_reasons,
+            "exchanges": exchanges,
+            "exchanges_text": " + ".join(exchanges),
+            "best_exchange": str(top_row["exchange"]),
+            "best_rsi_1h": float(group_sorted["rsi_1h"].max()),
+            "best_rsi_4h": float(group_sorted["rsi_4h"].max()),
+            "best_price_change_24h_percent": float(max_price_change),
+            "best_volume_usd_24h_exact": None if pd.isna(max_volume) else float(max_volume),
+            "best_volume_change_24h_percent": None if pd.isna(max_volume_change) else float(max_volume_change),
+            "details": details,
+        })
+
+    groups = sorted(
+        groups,
+        key=lambda item: (
+            item["signal_rank"],
+            item["best_rsi_4h"],
+            item["best_rsi_1h"],
+            item["best_price_change_24h_percent"],
+            item["best_volume_usd_24h_exact"] or 0,
+        ),
+        reverse=True,
+    )
+
+    return groups[:max_groups]
+
+
+def prepare_grouped_output_table(grouped_signals):
+    if not grouped_signals:
+        return pd.DataFrame()
+
+    rows = []
+
+    for item in grouped_signals:
+        rows.append({
+            "signal_level": item["signal_level"],
+            "symbol": item["symbol"],
+            "exchanges": item["exchanges_text"],
+            "best_exchange": item["best_exchange"],
+            "best_rsi_1h": round(item["best_rsi_1h"], 2),
+            "best_rsi_4h": round(item["best_rsi_4h"], 2),
+            "best_chg_24h_%": format_percent_2(item["best_price_change_24h_percent"]),
+            "best_vol_24h": format_large_number(item["best_volume_usd_24h_exact"]),
+            "best_vol_chg_24h_%": format_percent_2(item["best_volume_change_24h_percent"]),
+            "reason": item["reason"],
+        })
+
+    return pd.DataFrame(rows)
+
+
+def grouped_signal_badges(group):
+    badges = []
+
+    chg_24h = group.get("best_price_change_24h_percent")
+    vol_chg = group.get("best_volume_change_24h_percent")
+
+    if chg_24h is not None and chg_24h >= 20:
+        badges.append("🚀 Strong pump")
+
+    if vol_chg is not None and vol_chg >= 100:
+        badges.append("🔥 Volume spike")
+
+    if vol_chg is not None and vol_chg < 0:
+        badges.append("⚠️ Volume fading")
+
+    return badges
+
+
+def format_multi_provider_telegram(
+    grouped_signals,
+    okx_total,
+    okx_prefiltered,
+    okx_active,
+    bitget_total,
+    bitget_prefiltered,
+    bitget_active,
 ):
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
 
     lines = []
 
-    lines.append("🚨 <b>OKX RSI Screener</b>")
+    lines.append("🚨 <b>Multi-Exchange RSI Screener</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
     lines.append("")
+    lines.append(f"OKX: <code>{okx_active}</code> signals / <code>{okx_total}</code> universe")
+    lines.append(f"Bitget: <code>{bitget_active}</code> signals / <code>{bitget_total}</code> universe")
+    lines.append("")
 
-    if df_active_output is None or df_active_output.empty:
+    if not grouped_signals:
         lines.append("✅ Активних сигналів немає.")
         return "\n".join(lines)
 
-    for idx, row in df_active_output.iterrows():
-        signal_label = telegram_signal_label(row["signal_level"])
+    for idx, group in enumerate(grouped_signals):
+        signal_label = telegram_signal_label(group["signal_level"])
 
-        symbol = html.escape(str(row["symbol"]))
-        price = html.escape(str(row["price"]))
-        rsi_1h = html.escape(str(row["rsi_1h"]))
-        rsi_4h = html.escape(str(row["rsi_4h"]))
-        chg_24h = html.escape(str(row["chg_24h_%"]))
-        vol_24h = html.escape(str(row["vol_24h"]))
-        vol_chg = html.escape(str(row["vol_chg_24h_%"]))
-        reason = html.escape(str(row["reason"]))
+        symbol = html.escape(str(group["symbol"]))
+        exchanges = html.escape(str(group["exchanges_text"]))
 
         lines.append(f"{idx + 1}) {signal_label}")
         lines.append(f"📌 <b>{symbol}</b>")
-        lines.append(f"💵 Price: <code>{price}</code>")
-        lines.append(f"📊 RSI 1H / 4H: <code>{rsi_1h} / {rsi_4h}</code>")
-        lines.append(f"📈 24h: <code>{chg_24h}%</code>")
-        lines.append(f"💰 Vol: <code>{vol_24h}</code>")
-        lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+        lines.append(f"🏦 Exchanges: <b>{exchanges}</b>")
 
-        badges = telegram_signal_badges(row)
+        if len(group["details"]) == 1:
+            detail = group["details"][0]
+
+            price = html.escape(str(detail["price"]))
+            rsi_1h = html.escape(str(detail["rsi_1h"]))
+            rsi_4h = html.escape(str(detail["rsi_4h"]))
+            chg_24h = html.escape(str(detail["chg_24h_%"]))
+            vol_24h = html.escape(str(detail["vol_24h"]))
+            vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
+
+            lines.append(f"💵 Price: <code>{price}</code>")
+            lines.append(f"📊 RSI 1H / 4H: <code>{rsi_1h} / {rsi_4h}</code>")
+            lines.append(f"📈 24h: <code>{chg_24h}%</code>")
+            lines.append(f"💰 Vol: <code>{vol_24h}</code>")
+            lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+
+        else:
+            lines.append("📊 <b>Exchange details:</b>")
+
+            for detail in group["details"]:
+                exchange = html.escape(str(detail["exchange"]))
+                price = html.escape(str(detail["price"]))
+                rsi_1h = html.escape(str(detail["rsi_1h"]))
+                rsi_4h = html.escape(str(detail["rsi_4h"]))
+                chg_24h = html.escape(str(detail["chg_24h_%"]))
+                vol_24h = html.escape(str(detail["vol_24h"]))
+                vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
+
+                lines.append(
+                    f"• <b>{exchange}</b>: "
+                    f"Price <code>{price}</code> | "
+                    f"RSI <code>{rsi_1h}/{rsi_4h}</code> | "
+                    f"24h <code>{chg_24h}%</code> | "
+                    f"Vol <code>{vol_24h}</code> | "
+                    f"Vol chg <code>{vol_chg}%</code>"
+                )
+
+        badges = grouped_signal_badges(group)
 
         if badges:
             lines.append("")
@@ -854,9 +1262,16 @@ def format_active_signals_for_telegram(
                 lines.append(badge)
 
         lines.append("")
-        lines.append(f"Reason: <i>{reason}</i>")
 
-        if idx != len(df_active_output) - 1:
+        if len(group["reasons"]) == 1:
+            reason = html.escape(str(group["reasons"][0]))
+            lines.append(f"Reason: <i>{reason}</i>")
+        else:
+            lines.append("Reasons:")
+            for reason in group["reasons"]:
+                lines.append(f"• <i>{html.escape(str(reason))}</i>")
+
+        if idx != len(grouped_signals) - 1:
             lines.append("")
             lines.append("────────────")
             lines.append("")
@@ -864,62 +1279,94 @@ def format_active_signals_for_telegram(
     return "\n".join(lines)
 
 
-def run_screener_once_and_send_telegram():
-    started_at = datetime.now(KYIV_TZ)
+# ============================================================
+# MULTI PROVIDER RUNNER
+# ============================================================
+
+def run_multi_provider_screener():
+    print("\n" + "=" * 120)
+    print("RUNNING MULTI-PROVIDER SCREENER")
+    print("=" * 120)
+
+    okx_results, okx_total, okx_prefiltered, okx_active = run_okx_screener()
+    bitget_results, bitget_total, bitget_prefiltered, bitget_active = run_bitget_screener()
+
+    frames = []
+
+    if okx_results is not None and not okx_results.empty:
+        frames.append(okx_results)
+
+    if bitget_results is not None and not bitget_results.empty:
+        frames.append(bitget_results)
+
+    if not frames:
+        df_all = pd.DataFrame()
+    else:
+        df_all = pd.concat(frames, ignore_index=True)
+
+    if df_all.empty:
+        df_active = pd.DataFrame()
+    else:
+        df_all["signal_rank"] = df_all["signal_level"].apply(get_signal_rank)
+
+        df_all = df_all.sort_values(
+            by=[
+                "signal_rank",
+                "rsi_4h",
+                "rsi_1h",
+                "price_change_24h_percent",
+                "volume_usd_24h_exact",
+            ],
+            ascending=[False, False, False, False, False],
+        ).reset_index(drop=True)
+
+        df_active = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
 
     print("\n" + "=" * 120)
-    print("RUNNING GITHUB ACTIONS SCREENER")
+    print("MULTI-PROVIDER SUMMARY")
     print("=" * 120)
-    print("Started at:", started_at.strftime("%Y-%m-%d %H:%M:%S Kyiv"))
-
-    df_results, total_universe_count, prefiltered_count, active_count = run_screener()
-
-    if df_results is not None and not df_results.empty:
-        df_active = df_results[df_results["signal_level"] != "NO_SIGNAL"].copy()
-    else:
-        df_active = pd.DataFrame()
-
-    if df_active.empty:
-        print("No active signals.")
-
-        if SEND_MESSAGE_IF_NO_SIGNALS:
-            message = format_active_signals_for_telegram(
-                df_active_output=pd.DataFrame(),
-                total_universe_count=total_universe_count,
-                prefiltered_count=prefiltered_count,
-                active_count=active_count
-            )
-
-            send_telegram_message_safe(message)
-
-        return df_results
+    print("OKX total universe:", okx_total)
+    print("OKX prefiltered:", okx_prefiltered)
+    print("OKX active:", okx_active)
+    print("Bitget total universe:", bitget_total)
+    print("Bitget prefiltered:", bitget_prefiltered)
+    print("Bitget active:", bitget_active)
+    print("Total active signals:", len(df_active))
 
     df_active_output = prepare_active_output_table(df_active)
+    grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
+    df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
-    print_df(
-        df_active_output,
-        title="ACTIVE SIGNALS ONLY",
-        max_rows=FINAL_TOP_N
-    )
+    if df_active_output.empty:
+        print("No active signals.")
+    else:
+        print("\n" + "=" * 120)
+        print("ACTIVE SIGNALS BY EXCHANGE")
+        print("=" * 120)
+        print(df_active_output.head(FINAL_TOP_N).to_string(index=False))
 
-    message = format_active_signals_for_telegram(
-        df_active_output=df_active_output,
-        total_universe_count=total_universe_count,
-        prefiltered_count=prefiltered_count,
-        active_count=active_count
-    )
+        print("\n" + "=" * 120)
+        print("ACTIVE SIGNALS GROUPED BY SYMBOL")
+        print("=" * 120)
+        print(df_grouped_output.head(FINAL_TOP_N).to_string(index=False))
 
-    send_telegram_message_safe(message)
+    if SEND_MESSAGE_IF_NO_SIGNALS or grouped_signals:
+        message = format_multi_provider_telegram(
+            grouped_signals=grouped_signals,
+            okx_total=okx_total,
+            okx_prefiltered=okx_prefiltered,
+            okx_active=okx_active,
+            bitget_total=bitget_total,
+            bitget_prefiltered=bitget_prefiltered,
+            bitget_active=bitget_active,
+        )
 
-    finished_at = datetime.now(KYIV_TZ)
-    print("Finished at:", finished_at.strftime("%Y-%m-%d %H:%M:%S Kyiv"))
-
-    return df_results
+        send_telegram_message_safe(message)
 
 
 def main():
-    validate_telegram_config()
-    run_screener_once_and_send_telegram()
+    get_telegram_credentials()
+    run_multi_provider_screener()
 
 
 if __name__ == "__main__":
