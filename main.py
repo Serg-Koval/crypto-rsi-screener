@@ -1082,8 +1082,10 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
 
         details = []
 
-        group_by_exchange = group_sorted.sort_values(
-            by=["exchange", "signal_rank"],
+        group_by_exchange = group_sorted.copy()
+        group_by_exchange["exchange_order"] = group_by_exchange["exchange"].apply(exchange_sort_key)
+        group_by_exchange = group_by_exchange.sort_values(
+            by=["exchange_order", "signal_rank"],
             ascending=[True, False],
         )
 
@@ -1192,34 +1194,47 @@ def format_multi_provider_telegram(
     bitget_prefiltered,
     bitget_active,
 ):
+    """
+    Compact Telegram report.
+
+    Що змінено:
+    - прибрали технічний блок OKX/Bitget universe;
+    - залишили тільки загальну кількість згрупованих сигналів;
+    - для кількох бірж показуємо кожну біржу окремим коротким блоком;
+    - прибрали довгі рядки, які погано переносяться в Telegram.
+    """
+
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
 
     lines = []
 
     lines.append("🚨 <b>Multi-Exchange RSI Screener</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
-    lines.append("")
-    lines.append(f"OKX: <code>{okx_active}</code> signals / <code>{okx_total}</code> universe")
-    lines.append(f"Bitget: <code>{bitget_active}</code> signals / <code>{bitget_total}</code> universe")
+
+    if grouped_signals:
+        lines.append(f"📌 Signals: <b>{len(grouped_signals)}</b>")
+
     lines.append("")
 
     if not grouped_signals:
         lines.append("✅ Активних сигналів немає.")
-        return "\n".join(lines)
+        return "
+".join(lines)
 
     for idx, group in enumerate(grouped_signals):
         signal_label = telegram_signal_label(group["signal_level"])
-
         symbol = html.escape(str(group["symbol"]))
         exchanges = html.escape(str(group["exchanges_text"]))
 
         lines.append(f"{idx + 1}) {signal_label}")
         lines.append(f"📌 <b>{symbol}</b>")
-        lines.append(f"🏦 Exchanges: <b>{exchanges}</b>")
+        lines.append(f"🏦 <b>{exchanges}</b>")
 
+        # One exchange: compact block
         if len(group["details"]) == 1:
             detail = group["details"][0]
 
+            exchange = html.escape(str(detail["exchange"]))
             price = html.escape(str(detail["price"]))
             rsi_1h = html.escape(str(detail["rsi_1h"]))
             rsi_4h = html.escape(str(detail["rsi_4h"]))
@@ -1227,14 +1242,17 @@ def format_multi_provider_telegram(
             vol_24h = html.escape(str(detail["vol_24h"]))
             vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
 
-            lines.append(f"💵 Price: <code>{price}</code>")
-            lines.append(f"📊 RSI 1H / 4H: <code>{rsi_1h} / {rsi_4h}</code>")
-            lines.append(f"📈 24h: <code>{chg_24h}%</code>")
-            lines.append(f"💰 Vol: <code>{vol_24h}</code>")
-            lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+            lines.append("")
+            lines.append(f"<b>{exchange}</b>")
+            lines.append(f"Price: <code>{price}</code>")
+            lines.append(f"RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
+            lines.append(f"24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
+            lines.append(f"Vol chg: <code>{vol_chg}%</code>")
 
+        # Multiple exchanges: one small block per exchange
         else:
-            lines.append("📊 <b>Exchange details:</b>")
+            lines.append("")
+            lines.append("📊 <b>Exchange details</b>")
 
             for detail in group["details"]:
                 exchange = html.escape(str(detail["exchange"]))
@@ -1245,14 +1263,12 @@ def format_multi_provider_telegram(
                 vol_24h = html.escape(str(detail["vol_24h"]))
                 vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
 
-                lines.append(
-                    f"• <b>{exchange}</b>: "
-                    f"Price <code>{price}</code> | "
-                    f"RSI <code>{rsi_1h}/{rsi_4h}</code> | "
-                    f"24h <code>{chg_24h}%</code> | "
-                    f"Vol <code>{vol_24h}</code> | "
-                    f"Vol chg <code>{vol_chg}%</code>"
-                )
+                lines.append("")
+                lines.append(f"<b>{exchange}</b>")
+                lines.append(f"Price: <code>{price}</code>")
+                lines.append(f"RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
+                lines.append(f"24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
+                lines.append(f"Vol chg: <code>{vol_chg}%</code>")
 
         badges = grouped_signal_badges(group)
 
@@ -1276,7 +1292,8 @@ def format_multi_provider_telegram(
             lines.append("────────────")
             lines.append("")
 
-    return "\n".join(lines)
+    return "
+".join(lines)
 
 
 # ============================================================
