@@ -1112,6 +1112,8 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
         max_volume_change = group_sorted["volume_change_24h_percent"].max()
         max_volume = group_sorted["volume_usd_24h_exact"].max()
 
+        display_detail = details[0] if details else {}
+
         groups.append({
             "symbol": str(symbol),
             "signal_level": str(top_row["signal_level"]),
@@ -1127,6 +1129,7 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
             "best_volume_usd_24h_exact": None if pd.isna(max_volume) else float(max_volume),
             "best_volume_change_24h_percent": None if pd.isna(max_volume_change) else float(max_volume_change),
             "details": details,
+            "display_detail": display_detail,
         })
 
     groups = sorted(
@@ -1168,10 +1171,23 @@ def prepare_grouped_output_table(grouped_signals):
 
 
 def grouped_signal_badges(group):
+    """
+    Badges are calculated from the same values that Telegram displays.
+
+    Rule:
+    - if the symbol exists on OKX, Telegram displays OKX values;
+    - otherwise Telegram displays the first available exchange values.
+    """
+
     badges = []
 
-    chg_24h = group.get("best_price_change_24h_percent")
-    vol_chg = group.get("best_volume_change_24h_percent")
+    detail = group.get("display_detail")
+
+    if not detail:
+        return badges
+
+    chg_24h = parse_float_from_value(detail.get("chg_24h_%"))
+    vol_chg = parse_float_from_value(detail.get("vol_chg_24h_%"))
 
     if chg_24h is not None and chg_24h >= 20:
         badges.append("🚀 Strong pump")
@@ -1195,13 +1211,15 @@ def format_multi_provider_telegram(
     bitget_active,
 ):
     """
-    Compact Telegram report.
+    Clean Telegram report.
 
-    Що змінено:
-    - прибрали технічний блок OKX/Bitget universe;
-    - залишили тільки загальну кількість згрупованих сигналів;
-    - для кількох бірж показуємо кожну біржу окремим коротким блоком;
-    - прибрали довгі рядки, які погано переносяться в Telegram.
+    Display rules:
+    - no technical OKX/Bitget universe block;
+    - no exchange names in Telegram;
+    - no "Exchange details" section;
+    - if a pair exists on OKX and Bitget, display OKX values;
+    - if a pair exists only on Bitget, display Bitget values;
+    - GitHub logs still keep provider-level diagnostics.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
@@ -1223,51 +1241,24 @@ def format_multi_provider_telegram(
     for idx, group in enumerate(grouped_signals):
         signal_label = telegram_signal_label(group["signal_level"])
         symbol = html.escape(str(group["symbol"]))
-        exchanges = html.escape(str(group["exchanges_text"]))
+
+        detail = group.get("display_detail") or {}
+
+        price = html.escape(str(detail.get("price", "N/A")))
+        rsi_1h = html.escape(str(detail.get("rsi_1h", "N/A")))
+        rsi_4h = html.escape(str(detail.get("rsi_4h", "N/A")))
+        chg_24h = html.escape(str(detail.get("chg_24h_%", "N/A")))
+        vol_24h = html.escape(str(detail.get("vol_24h", "N/A")))
+        vol_chg = html.escape(str(detail.get("vol_chg_24h_%", "N/A")))
 
         lines.append(f"{idx + 1}) {signal_label}")
         lines.append(f"📌 <b>{symbol}</b>")
-        lines.append(f"🏦 <b>{exchanges}</b>")
-
-        # One exchange: compact block
-        if len(group["details"]) == 1:
-            detail = group["details"][0]
-
-            exchange = html.escape(str(detail["exchange"]))
-            price = html.escape(str(detail["price"]))
-            rsi_1h = html.escape(str(detail["rsi_1h"]))
-            rsi_4h = html.escape(str(detail["rsi_4h"]))
-            chg_24h = html.escape(str(detail["chg_24h_%"]))
-            vol_24h = html.escape(str(detail["vol_24h"]))
-            vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
-
-            lines.append("")
-            lines.append(f"<b>{exchange}</b>")
-            lines.append(f"Price: <code>{price}</code>")
-            lines.append(f"RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
-            lines.append(f"24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
-            lines.append(f"Vol chg: <code>{vol_chg}%</code>")
-
-        # Multiple exchanges: one small block per exchange
-        else:
-            lines.append("")
-            lines.append("📊 <b>Exchange details</b>")
-
-            for detail in group["details"]:
-                exchange = html.escape(str(detail["exchange"]))
-                price = html.escape(str(detail["price"]))
-                rsi_1h = html.escape(str(detail["rsi_1h"]))
-                rsi_4h = html.escape(str(detail["rsi_4h"]))
-                chg_24h = html.escape(str(detail["chg_24h_%"]))
-                vol_24h = html.escape(str(detail["vol_24h"]))
-                vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
-
-                lines.append("")
-                lines.append(f"<b>{exchange}</b>")
-                lines.append(f"Price: <code>{price}</code>")
-                lines.append(f"RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
-                lines.append(f"24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
-                lines.append(f"Vol chg: <code>{vol_chg}%</code>")
+        lines.append("")
+        lines.append(f"💵 Price: <code>{price}</code>")
+        lines.append(f"📊 RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
+        lines.append(f"📈 24h: <code>{chg_24h}%</code>")
+        lines.append(f"💰 Vol: <code>{vol_24h}</code>")
+        lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
 
         badges = grouped_signal_badges(group)
 
