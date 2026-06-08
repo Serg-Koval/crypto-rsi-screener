@@ -2,6 +2,9 @@ name: OKX RSI Screener
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 9,11,13,15,17,19,21 * * *"
+      timezone: "Europe/Kyiv"
 
 jobs:
   run-screener:
@@ -19,6 +22,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Wait for candle close confirmation
+        run: sleep 15
 
       - name: Run screener
         env:
