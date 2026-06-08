@@ -1032,8 +1032,159 @@ def prepare_active_output_table(df_active):
     return df_out[columns]
 
 
+def exchange_sort_key(exchange):
+    order = {
+        "OKX": 1,
+        "Bitget": 2,
+    }
+
+    return order.get(str(exchange), 99)
+
+
+def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
+    """
+    Групує активні сигнали по symbol.
+
+    Навіщо:
+    - якщо BEATUSDT.P є і на OKX, і на Bitget, Telegram покаже його один раз;
+    - всередині одного блоку буде видно всі біржі;
+    - ранжування береться за найсильнішим сигналом серед бірж.
+    """
+
+    if df_active is None or df_active.empty:
+        return []
+
+    df = df_active.copy()
+    df["signal_rank"] = df["signal_level"].apply(get_signal_rank)
+    df["sort_volume"] = df["volume_usd_24h_exact"].fillna(0)
+    df["sort_vol_chg"] = df["volume_change_24h_percent"].fillna(-999999)
+
+    groups = []
+
+    for symbol, group in df.groupby("symbol", sort=False):
+        group_sorted = group.sort_values(
+            by=[
+                "signal_rank",
+                "rsi_4h",
+                "rsi_1h",
+                "price_change_24h_percent",
+                "sort_volume",
+            ],
+            ascending=[False, False, False, False, False],
+        ).reset_index(drop=True)
+
+        top_row = group_sorted.iloc[0]
+
+        exchanges = sorted(
+            group_sorted["exchange"].dropna().astype(str).unique().tolist(),
+            key=exchange_sort_key,
+        )
+
+        details = []
+
+        group_by_exchange = group_sorted.sort_values(
+            by=["exchange", "signal_rank"],
+            ascending=[True, False],
+        )
+
+        for _, row in group_by_exchange.iterrows():
+            details.append({
+                "exchange": str(row["exchange"]),
+                "signal_level": str(row["signal_level"]),
+                "reason": str(row["reason"]),
+                "price": format_price_2(row["price"]),
+                "rsi_1h": f"{float(row['rsi_1h']):.2f}",
+                "rsi_4h": f"{float(row['rsi_4h']):.2f}",
+                "chg_24h_%": format_percent_2(row["price_change_24h_percent"]),
+                "vol_24h": format_large_number(row["volume_usd_24h_exact"]),
+                "vol_chg_24h_%": format_percent_2(row["volume_change_24h_percent"]),
+            })
+
+        unique_reasons = []
+
+        for reason in group_sorted["reason"].astype(str).tolist():
+            if reason not in unique_reasons:
+                unique_reasons.append(reason)
+
+        max_price_change = group_sorted["price_change_24h_percent"].max()
+        max_volume_change = group_sorted["volume_change_24h_percent"].max()
+        max_volume = group_sorted["volume_usd_24h_exact"].max()
+
+        groups.append({
+            "symbol": str(symbol),
+            "signal_level": str(top_row["signal_level"]),
+            "signal_rank": int(top_row["signal_rank"]),
+            "reason": str(top_row["reason"]),
+            "reasons": unique_reasons,
+            "exchanges": exchanges,
+            "exchanges_text": " + ".join(exchanges),
+            "best_exchange": str(top_row["exchange"]),
+            "best_rsi_1h": float(group_sorted["rsi_1h"].max()),
+            "best_rsi_4h": float(group_sorted["rsi_4h"].max()),
+            "best_price_change_24h_percent": float(max_price_change),
+            "best_volume_usd_24h_exact": None if pd.isna(max_volume) else float(max_volume),
+            "best_volume_change_24h_percent": None if pd.isna(max_volume_change) else float(max_volume_change),
+            "details": details,
+        })
+
+    groups = sorted(
+        groups,
+        key=lambda item: (
+            item["signal_rank"],
+            item["best_rsi_4h"],
+            item["best_rsi_1h"],
+            item["best_price_change_24h_percent"],
+            item["best_volume_usd_24h_exact"] or 0,
+        ),
+        reverse=True,
+    )
+
+    return groups[:max_groups]
+
+
+def prepare_grouped_output_table(grouped_signals):
+    if not grouped_signals:
+        return pd.DataFrame()
+
+    rows = []
+
+    for item in grouped_signals:
+        rows.append({
+            "signal_level": item["signal_level"],
+            "symbol": item["symbol"],
+            "exchanges": item["exchanges_text"],
+            "best_exchange": item["best_exchange"],
+            "best_rsi_1h": round(item["best_rsi_1h"], 2),
+            "best_rsi_4h": round(item["best_rsi_4h"], 2),
+            "best_chg_24h_%": format_percent_2(item["best_price_change_24h_percent"]),
+            "best_vol_24h": format_large_number(item["best_volume_usd_24h_exact"]),
+            "best_vol_chg_24h_%": format_percent_2(item["best_volume_change_24h_percent"]),
+            "reason": item["reason"],
+        })
+
+    return pd.DataFrame(rows)
+
+
+def grouped_signal_badges(group):
+    badges = []
+
+    chg_24h = group.get("best_price_change_24h_percent")
+    vol_chg = group.get("best_volume_change_24h_percent")
+
+    if chg_24h is not None and chg_24h >= 20:
+        badges.append("🚀 Strong pump")
+
+    if vol_chg is not None and vol_chg >= 100:
+        badges.append("🔥 Volume spike")
+
+    if vol_chg is not None and vol_chg < 0:
+        badges.append("⚠️ Volume fading")
+
+    return badges
+
+
 def format_multi_provider_telegram(
-    df_active_output,
+    grouped_signals,
     okx_total,
     okx_prefiltered,
     okx_active,
@@ -1052,33 +1203,58 @@ def format_multi_provider_telegram(
     lines.append(f"Bitget: <code>{bitget_active}</code> signals / <code>{bitget_total}</code> universe")
     lines.append("")
 
-    if df_active_output is None or df_active_output.empty:
+    if not grouped_signals:
         lines.append("✅ Активних сигналів немає.")
         return "\n".join(lines)
 
-    for idx, row in df_active_output.iterrows():
-        signal_label = telegram_signal_label(row["signal_level"])
+    for idx, group in enumerate(grouped_signals):
+        signal_label = telegram_signal_label(group["signal_level"])
 
-        exchange = html.escape(str(row["exchange"]))
-        symbol = html.escape(str(row["symbol"]))
-        price = html.escape(str(row["price"]))
-        rsi_1h = html.escape(str(row["rsi_1h"]))
-        rsi_4h = html.escape(str(row["rsi_4h"]))
-        chg_24h = html.escape(str(row["chg_24h_%"]))
-        vol_24h = html.escape(str(row["vol_24h"]))
-        vol_chg = html.escape(str(row["vol_chg_24h_%"]))
-        reason = html.escape(str(row["reason"]))
+        symbol = html.escape(str(group["symbol"]))
+        exchanges = html.escape(str(group["exchanges_text"]))
 
         lines.append(f"{idx + 1}) {signal_label}")
         lines.append(f"📌 <b>{symbol}</b>")
-        lines.append(f"🏦 Exchange: <b>{exchange}</b>")
-        lines.append(f"💵 Price: <code>{price}</code>")
-        lines.append(f"📊 RSI 1H / 4H: <code>{rsi_1h} / {rsi_4h}</code>")
-        lines.append(f"📈 24h: <code>{chg_24h}%</code>")
-        lines.append(f"💰 Vol: <code>{vol_24h}</code>")
-        lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+        lines.append(f"🏦 Exchanges: <b>{exchanges}</b>")
 
-        badges = telegram_signal_badges(row)
+        if len(group["details"]) == 1:
+            detail = group["details"][0]
+
+            price = html.escape(str(detail["price"]))
+            rsi_1h = html.escape(str(detail["rsi_1h"]))
+            rsi_4h = html.escape(str(detail["rsi_4h"]))
+            chg_24h = html.escape(str(detail["chg_24h_%"]))
+            vol_24h = html.escape(str(detail["vol_24h"]))
+            vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
+
+            lines.append(f"💵 Price: <code>{price}</code>")
+            lines.append(f"📊 RSI 1H / 4H: <code>{rsi_1h} / {rsi_4h}</code>")
+            lines.append(f"📈 24h: <code>{chg_24h}%</code>")
+            lines.append(f"💰 Vol: <code>{vol_24h}</code>")
+            lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+
+        else:
+            lines.append("📊 <b>Exchange details:</b>")
+
+            for detail in group["details"]:
+                exchange = html.escape(str(detail["exchange"]))
+                price = html.escape(str(detail["price"]))
+                rsi_1h = html.escape(str(detail["rsi_1h"]))
+                rsi_4h = html.escape(str(detail["rsi_4h"]))
+                chg_24h = html.escape(str(detail["chg_24h_%"]))
+                vol_24h = html.escape(str(detail["vol_24h"]))
+                vol_chg = html.escape(str(detail["vol_chg_24h_%"]))
+
+                lines.append(
+                    f"• <b>{exchange}</b>: "
+                    f"Price <code>{price}</code> | "
+                    f"RSI <code>{rsi_1h}/{rsi_4h}</code> | "
+                    f"24h <code>{chg_24h}%</code> | "
+                    f"Vol <code>{vol_24h}</code> | "
+                    f"Vol chg <code>{vol_chg}%</code>"
+                )
+
+        badges = grouped_signal_badges(group)
 
         if badges:
             lines.append("")
@@ -1086,9 +1262,16 @@ def format_multi_provider_telegram(
                 lines.append(badge)
 
         lines.append("")
-        lines.append(f"Reason: <i>{reason}</i>")
 
-        if idx != len(df_active_output) - 1:
+        if len(group["reasons"]) == 1:
+            reason = html.escape(str(group["reasons"][0]))
+            lines.append(f"Reason: <i>{reason}</i>")
+        else:
+            lines.append("Reasons:")
+            for reason in group["reasons"]:
+                lines.append(f"• <i>{html.escape(str(reason))}</i>")
+
+        if idx != len(grouped_signals) - 1:
             lines.append("")
             lines.append("────────────")
             lines.append("")
@@ -1151,18 +1334,25 @@ def run_multi_provider_screener():
     print("Total active signals:", len(df_active))
 
     df_active_output = prepare_active_output_table(df_active)
+    grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
+    df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
         print("No active signals.")
     else:
         print("\n" + "=" * 120)
-        print("ACTIVE SIGNALS ONLY")
+        print("ACTIVE SIGNALS BY EXCHANGE")
         print("=" * 120)
         print(df_active_output.head(FINAL_TOP_N).to_string(index=False))
 
-    if SEND_MESSAGE_IF_NO_SIGNALS or not df_active_output.empty:
+        print("\n" + "=" * 120)
+        print("ACTIVE SIGNALS GROUPED BY SYMBOL")
+        print("=" * 120)
+        print(df_grouped_output.head(FINAL_TOP_N).to_string(index=False))
+
+    if SEND_MESSAGE_IF_NO_SIGNALS or grouped_signals:
         message = format_multi_provider_telegram(
-            df_active_output=df_active_output.head(FINAL_TOP_N),
+            grouped_signals=grouped_signals,
             okx_total=okx_total,
             okx_prefiltered=okx_prefiltered,
             okx_active=okx_active,
