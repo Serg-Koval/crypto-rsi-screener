@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r2"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r3"
 
 RSI_PERIOD = 14
 
@@ -52,7 +52,13 @@ LIQUIDITY_SWEEP_LOOKBACKS = {
 LIQUIDITY_SWEEP_MIN_BREAK_PCT = 0.001      # 0.10% above previous high
 LIQUIDITY_SWEEP_MIN_CLOSE_BACK_PCT = 0.0005 # 0.05% close back below previous high
 LIQUIDITY_SWEEP_LIVE_INVALIDATION_PCT = 0.0005 # current/live candle reclaimed level
-LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 # swept high must be at least 5 candles old
+LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 # swept high must be at least 5 hours old
+LIQUIDITY_SWEEP_MIN_REACTION_PCT = 0.015 # price must have reacted at least 1.5% from the level before sweep
+LIQUIDITY_SWEEP_EQUAL_HIGH_TOLERANCE_PCT = 0.0025 # highs within 0.25% are treated as equal-high liquidity
+LIQUIDITY_SWEEP_SWING_LEFT_BARS = 2
+LIQUIDITY_SWEEP_SWING_RIGHT_BARS = 2
+LIQUIDITY_SWEEP_LEVEL_LOOKBACK_1H = 240
+LIQUIDITY_SWEEP_LEVEL_LOOKBACK_4H = 120
 PREMIUM_ZONE_LOOKBACK = 72
 PREMIUM_ZONE_LOOKBACK_1H = 72
 PREMIUM_ZONE_LOOKBACK_4H = 42
@@ -396,7 +402,411 @@ def get_live_candle_for_analysis(df):
     return work_df.iloc[live_index], live_index
 
 
+
+def get_timeframe_hours(timeframe):
+    if timeframe == "4H":
+        return 4
+
+    return 1
+
+
+def get_candle_time(candle):
+    if candle is None:
+        return None
+
+    try:
+        if "timestamp" in candle.index and not pd.isna(candle["timestamp"]):
+            return pd.to_datetime(candle["timestamp"])
+    except Exception:
+        return None
+
+    return None
+
+
+def calculate_level_age_hours(candidate_index, level_index, timeframe="1H", candidate_time=None, level_time=None):
+    if candidate_time is not None and level_time is not None:
+        try:
+            delta_hours = (pd.to_datetime(candidate_time) - pd.to_datetime(level_time)).total_seconds() / 3600
+
+            if delta_hours >= 0:
+                return float(delta_hours)
+        except Exception:
+            pass
+
+    if candidate_index is None or level_index is None:
+        return None
+
+    return float(max(0, int(candidate_index) - int(level_index)) * get_timeframe_hours(timeframe))
+
+
+def calculate_reaction_pct_after_level(df, level_index, candidate_index, level_price):
+    """
+    Measure whether price actually moved away from the level before the sweep.
+
+    A visible liquidity level should not be only a fresh continuation high. After the
+    level is created, price should react lower by at least
+    LIQUIDITY_SWEEP_MIN_REACTION_PCT before it can be swept later.
+    """
+
+    if df is None or df.empty:
+        return 0.0
+
+    if level_index is None or candidate_index is None or level_price is None:
+        return 0.0
+
+    if int(level_index) >= int(candidate_index) - 1:
+        return 0.0
+
+    segment = df.iloc[int(level_index) + 1:int(candidate_index)]
+
+    if segment.empty or "low" not in segment.columns:
+        return 0.0
+
+    lows = pd.to_numeric(segment["low"], errors="coerce").dropna()
+
+    if lows.empty:
+        return 0.0
+
+    min_low = float(lows.min())
+    level_price = float(level_price)
+
+    if level_price <= 0:
+        return 0.0
+
+    return max(0.0, (level_price - min_low) / level_price)
+
+
+def make_liquidity_level(
+    price,
+    level_type,
+    timeframe,
+    source_index,
+    candidate_index,
+    touches=1,
+    quality=1,
+    reaction_pct=0.0,
+    candidate_time=None,
+    level_time=None,
+):
+    age_hours = calculate_level_age_hours(
+        candidate_index=candidate_index,
+        level_index=source_index,
+        timeframe=timeframe,
+        candidate_time=candidate_time,
+        level_time=level_time,
+    )
+
+    return {
+        "price": float(price),
+        "type": str(level_type),
+        "timeframe": str(timeframe),
+        "source_index": int(source_index),
+        "age_hours": 0.0 if age_hours is None else float(age_hours),
+        "touches": int(touches),
+        "quality": int(quality),
+        "reaction_pct": float(reaction_pct or 0.0),
+    }
+
+
+def liquidity_level_is_valid(level):
+    if not level:
+        return False
+
+    if float(level.get("age_hours", 0.0)) < float(LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS):
+        return False
+
+    if float(level.get("reaction_pct", 0.0)) < float(LIQUIDITY_SWEEP_MIN_REACTION_PCT):
+        return False
+
+    if float(level.get("price", 0.0)) <= 0:
+        return False
+
+    return True
+
+
+def collect_swing_high_levels(df, candidate_index, timeframe="1H", max_lookback=None):
+    if df is None or df.empty or candidate_index is None:
+        return []
+
+    work_df = df.copy().reset_index(drop=True)
+
+    if "high" not in work_df.columns or "low" not in work_df.columns:
+        return []
+
+    candidate_index = int(candidate_index)
+    left = int(LIQUIDITY_SWEEP_SWING_LEFT_BARS)
+    right = int(LIQUIDITY_SWEEP_SWING_RIGHT_BARS)
+
+    if candidate_index <= left + right:
+        return []
+
+    if max_lookback is None:
+        max_lookback = len(work_df)
+
+    start_index = max(0, candidate_index - int(max_lookback))
+    candidate_time = get_candle_time(work_df.iloc[candidate_index]) if candidate_index < len(work_df) else None
+
+    highs = pd.to_numeric(work_df["high"], errors="coerce")
+    levels = []
+
+    # Right side must be fully formed before candidate candle.
+    for i in range(start_index + left, candidate_index - right):
+        high_value = highs.iloc[i]
+
+        if pd.isna(high_value):
+            continue
+
+        left_window = highs.iloc[i - left:i]
+        right_window = highs.iloc[i + 1:i + right + 1]
+
+        if left_window.empty or right_window.empty:
+            continue
+
+        # Use a strict right-side condition so the level is a real pivot, not a still-forming impulse high.
+        is_swing_high = (
+            float(high_value) >= float(left_window.max()) and
+            float(high_value) > float(right_window.max())
+        )
+
+        if not is_swing_high:
+            continue
+
+        reaction_pct = calculate_reaction_pct_after_level(
+            work_df,
+            level_index=i,
+            candidate_index=candidate_index,
+            level_price=float(high_value),
+        )
+        level_time = get_candle_time(work_df.iloc[i])
+        quality = 4 if timeframe == "4H" else 2
+
+        level = make_liquidity_level(
+            price=float(high_value),
+            level_type=f"{timeframe} swing high",
+            timeframe=timeframe,
+            source_index=i,
+            candidate_index=candidate_index,
+            touches=1,
+            quality=quality,
+            reaction_pct=reaction_pct,
+            candidate_time=candidate_time,
+            level_time=level_time,
+        )
+
+        if liquidity_level_is_valid(level):
+            levels.append(level)
+
+    return levels
+
+
+def collect_equal_high_levels_from_swings(swing_levels, timeframe="1H"):
+    if not swing_levels:
+        return []
+
+    tolerance = float(LIQUIDITY_SWEEP_EQUAL_HIGH_TOLERANCE_PCT)
+    sorted_levels = sorted(swing_levels, key=lambda item: float(item.get("price", 0.0)))
+    clusters = []
+
+    for level in sorted_levels:
+        price = float(level["price"])
+        assigned = False
+
+        for cluster in clusters:
+            reference = float(cluster["reference_price"])
+
+            if reference > 0 and abs(price - reference) / reference <= tolerance:
+                cluster["levels"].append(level)
+                cluster["reference_price"] = float(np.mean([item["price"] for item in cluster["levels"]]))
+                assigned = True
+                break
+
+        if not assigned:
+            clusters.append({
+                "reference_price": price,
+                "levels": [level],
+            })
+
+    equal_levels = []
+
+    for cluster in clusters:
+        members = cluster["levels"]
+
+        if len(members) < 2:
+            continue
+
+        price = max(float(item["price"]) for item in members)
+        source_index = min(int(item["source_index"]) for item in members)
+        age_hours = max(float(item.get("age_hours", 0.0)) for item in members)
+        reaction_pct = max(float(item.get("reaction_pct", 0.0)) for item in members)
+        quality = 5 if timeframe == "4H" else 4
+
+        equal_level = {
+            "price": float(price),
+            "type": f"{timeframe} equal highs",
+            "timeframe": str(timeframe),
+            "source_index": int(source_index),
+            "age_hours": float(age_hours),
+            "touches": int(len(members)),
+            "quality": int(quality),
+            "reaction_pct": float(reaction_pct),
+        }
+
+        if liquidity_level_is_valid(equal_level):
+            equal_levels.append(equal_level)
+
+    return equal_levels
+
+
+def collect_rolling_high_levels(df, candidate_index, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
+    if df is None or df.empty or candidate_index is None:
+        return []
+
+    work_df = df.copy().reset_index(drop=True)
+    candidate_index = int(candidate_index)
+    candidate_time = get_candle_time(work_df.iloc[candidate_index]) if candidate_index < len(work_df) else None
+    levels = []
+
+    for label, lookback in sorted(lookbacks.items(), key=lambda item: item[1], reverse=True):
+        if candidate_index < int(lookback):
+            continue
+
+        previous = work_df.iloc[candidate_index - int(lookback):candidate_index]
+
+        if previous.empty:
+            continue
+
+        highs = pd.to_numeric(previous["high"], errors="coerce").dropna()
+
+        if highs.empty:
+            continue
+
+        level_index = int(highs.idxmax())
+        level_price = float(highs.loc[level_index])
+        reaction_pct = calculate_reaction_pct_after_level(
+            work_df,
+            level_index=level_index,
+            candidate_index=candidate_index,
+            level_price=level_price,
+        )
+        level_time = get_candle_time(work_df.iloc[level_index])
+
+        level = make_liquidity_level(
+            price=level_price,
+            level_type=f"{label} high",
+            timeframe="1H",
+            source_index=level_index,
+            candidate_index=candidate_index,
+            touches=1,
+            quality=1 if label == "12H" else 2,
+            reaction_pct=reaction_pct,
+            candidate_time=candidate_time,
+            level_time=level_time,
+        )
+
+        if liquidity_level_is_valid(level):
+            levels.append(level)
+
+    return levels
+
+
+def get_available_4h_levels_dataframe(df_4h, candidate_time):
+    if df_4h is None or df_4h.empty or candidate_time is None:
+        return pd.DataFrame()
+
+    work_df = df_4h.copy().reset_index(drop=True)
+
+    if "timestamp" not in work_df.columns:
+        return work_df.iloc[:-1].copy() if len(work_df) > 1 else pd.DataFrame()
+
+    timestamps = pd.to_datetime(work_df["timestamp"], errors="coerce")
+    candidate_time = pd.to_datetime(candidate_time)
+
+    if "confirm" in work_df.columns:
+        mask = (work_df["confirm"] == 1) & (timestamps < candidate_time)
+    else:
+        # Candle timestamp is treated as candle open time. For providers without an explicit
+        # confirm flag, include only 4H candles whose close time is before the candidate 1H candle.
+        mask = (timestamps + pd.Timedelta(hours=4)) <= candidate_time
+
+    return work_df[mask].copy().reset_index(drop=True)
+
+
+def collect_4h_liquidity_levels(df_4h, candidate_time):
+    available_4h = get_available_4h_levels_dataframe(df_4h, candidate_time)
+
+    if available_4h.empty:
+        return []
+
+    candidate_index = len(available_4h)
+    synthetic_candidate = available_4h.iloc[-1:].copy()
+    synthetic_candidate = synthetic_candidate.assign(timestamp=candidate_time)
+    work_df = pd.concat([available_4h, synthetic_candidate], ignore_index=True)
+
+    swing_levels = collect_swing_high_levels(
+        work_df,
+        candidate_index=candidate_index,
+        timeframe="4H",
+        max_lookback=LIQUIDITY_SWEEP_LEVEL_LOOKBACK_4H,
+    )
+    equal_levels = collect_equal_high_levels_from_swings(swing_levels, timeframe="4H")
+
+    return swing_levels + equal_levels
+
+
+def build_liquidity_levels_for_candidate(df_1h, candidate_index, df_4h=None):
+    if df_1h is None or df_1h.empty or candidate_index is None:
+        return []
+
+    work_df = df_1h.copy().reset_index(drop=True)
+    candidate_index = int(candidate_index)
+    candidate_time = get_candle_time(work_df.iloc[candidate_index]) if candidate_index < len(work_df) else None
+
+    swing_1h = collect_swing_high_levels(
+        work_df,
+        candidate_index=candidate_index,
+        timeframe="1H",
+        max_lookback=LIQUIDITY_SWEEP_LEVEL_LOOKBACK_1H,
+    )
+    equal_1h = collect_equal_high_levels_from_swings(swing_1h, timeframe="1H")
+    rolling_1h = collect_rolling_high_levels(work_df, candidate_index, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS)
+    levels_4h = collect_4h_liquidity_levels(df_4h, candidate_time)
+
+    levels = swing_1h + equal_1h + rolling_1h + levels_4h
+
+    deduped = []
+
+    for level in levels:
+        price = float(level.get("price", 0.0))
+
+        if price <= 0:
+            continue
+
+        duplicate_index = None
+
+        for i, existing in enumerate(deduped):
+            existing_price = float(existing.get("price", 0.0))
+
+            if existing_price > 0 and abs(price - existing_price) / existing_price <= LIQUIDITY_SWEEP_EQUAL_HIGH_TOLERANCE_PCT / 2:
+                duplicate_index = i
+                break
+
+        if duplicate_index is None:
+            deduped.append(level)
+        else:
+            existing = deduped[duplicate_index]
+
+            if int(level.get("quality", 0)) > int(existing.get("quality", 0)):
+                deduped[duplicate_index] = level
+
+    return deduped
+
+
 def previous_high_info_before_index(df, candle_index, lookback):
+    """
+    Compatibility helper for older diagnostics. The sweep model now uses
+    level-based liquidity detection instead of a single rolling high.
+    """
+
     if df is None or df.empty:
         return None
 
@@ -465,24 +875,69 @@ def is_sweep_invalidated_by_live_candle(live_candle, swept_high):
     return live_close >= reclaim_level
 
 
-def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
+def select_best_swept_level(candle, levels):
+    swept_levels = []
+
+    for level in levels or []:
+        price = float(level.get("price", 0.0))
+
+        if price <= 0:
+            continue
+
+        if evaluate_sweep_against_previous_high(candle, price):
+            swept_levels.append(level)
+
+    if not swept_levels:
+        return None
+
+    return sorted(
+        swept_levels,
+        key=lambda item: (
+            int(item.get("quality", 0)),
+            int(item.get("touches", 1)),
+            float(item.get("age_hours", 0.0)),
+            float(item.get("price", 0.0)),
+        ),
+        reverse=True,
+    )[0]
+
+
+def liquidity_level_label(level):
+    if not level:
+        return "liquidity level"
+
+    label = str(level.get("type", "liquidity level"))
+    touches = int(level.get("touches", 1))
+
+    if touches >= 2 and "equal" in label:
+        return f"{label} x{touches}"
+
+    return label
+
+
+def liquidity_level_points(level):
+    quality = int((level or {}).get("quality", 0))
+
+    if quality >= 4:
+        return 2
+
+    return 1
+
+
+def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
     """
-    Liquidity sweep model on 1H candles.
+    Level-based liquidity sweep model.
 
-    Confirmed sweep:
-    - last closed 1H candle swept previous 12H/24H high;
-    - last closed 1H candle closed back below that high;
-    - swept high must be at least LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS candles old.
+    The model first finds visible liquidity levels, then checks whether the latest
+    closed/live 1H candle has swept them.
 
-    Live sweep candidate:
-    - current live 1H candle swept previous 12H/24H high;
-    - current live 1H candle is currently back below that high;
-    - swept high must be at least LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS candles old;
-    - candle is not closed yet, so the signal can still turn into a breakout.
+    Valid liquidity levels:
+    - old 1H swing highs;
+    - old 4H swing highs;
+    - 1H/4H equal-high zones;
+    - auxiliary 12H/24H highs, only if they are old enough and reacted from.
 
-    Priority:
-    - confirmed 24H sweep > confirmed 12H sweep;
-    - live 24H candidate > live 12H candidate.
+    Young highs are not reported as sweeps.
     """
 
     if df_1h is None or df_1h.empty:
@@ -495,106 +950,80 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
 
     df = df_1h.copy().reset_index(drop=True)
 
-    max_lookback = max(lookbacks.values())
-
-    if len(df) < max_lookback + 1:
+    if len(df) < max(lookbacks.values()) + 1:
         return make_factor(
             key="liquidity_sweep",
             label="Liquidity sweep",
             status="not_enough_data",
-            detail=f"1H: requires {max_lookback + 1} candles",
+            detail=f"1H: requires {max(lookbacks.values()) + 1} candles",
         )
 
     closed_candle, closed_index = get_last_closed_candle_for_analysis(df)
     live_candle, live_index = get_live_candle_for_analysis(df)
 
-    # Stronger tier first.
-    tiers = [
-        ("24H", lookbacks["24H"], 2),
-        ("12H", lookbacks["12H"], 1),
-    ]
-
     checked_any = False
 
-    # Confirmed closed-candle sweep.
-    for label, lookback, points in tiers:
-        previous_high_info = previous_high_info_before_index(df, closed_index, lookback)
+    closed_levels = build_liquidity_levels_for_candidate(df, closed_index, df_4h=df_4h)
 
-        if previous_high_info is None:
-            continue
-
+    if closed_levels:
         checked_any = True
 
-        # Fresh highs are not treated as liquidity sweep levels.
-        # They are part of the current impulse / continuation attempt, not established liquidity.
-        if int(previous_high_info.get("age_bars", 0)) < LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS:
-            continue
+    closed_swept_level = select_best_swept_level(closed_candle, closed_levels)
 
-        previous_high = float(previous_high_info["high"])
+    if closed_swept_level is not None:
+        swept_price = float(closed_swept_level["price"])
 
-        if evaluate_sweep_against_previous_high(closed_candle, previous_high):
-            if live_index is not None and closed_index is not None and live_index != closed_index:
-                if is_sweep_invalidated_by_live_candle(live_candle, previous_high):
-                    return make_factor(
-                        key="liquidity_sweep",
-                        label="Liquidity sweep",
-                        status="not_confirmed",
-                        detail=(
-                            f"1H: {label} sweep invalidated — live candle reclaimed "
-                            f"{format_price_2(previous_high)}"
-                        ),
-                    )
-
-            return make_factor(
-                key="liquidity_sweep",
-                label="Liquidity sweep",
-                status="confirmed",
-                points=points,
-                detail=(
-                    f"1H closed: swept {label} high {format_price_2(previous_high)} "
-                    "and closed back below"
-                ),
-            )
-
-    # Live sweep candidate. Do not mark it as confirmed.
-    # If live_index == closed_index, then the latest candle is already closed, so no live candidate exists.
-    if live_index is not None and closed_index is not None and live_index != closed_index:
-        for label, lookback, points in tiers:
-            previous_high_info = previous_high_info_before_index(df, live_index, lookback)
-
-            if previous_high_info is None:
-                continue
-
-            checked_any = True
-
-            # Fresh highs are not treated as live sweep candidates either.
-            if int(previous_high_info.get("age_bars", 0)) < LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS:
-                continue
-
-            previous_high = float(previous_high_info["high"])
-
-            if evaluate_sweep_against_previous_high(live_candle, previous_high):
+        if live_index is not None and closed_index is not None and live_index != closed_index:
+            if is_sweep_invalidated_by_live_candle(live_candle, swept_price):
                 return make_factor(
                     key="liquidity_sweep",
                     label="Liquidity sweep",
-                    status="candidate",
-                    points=0,
-                    detail=f"1H live: swept {label} high {format_price_2(previous_high)}, candle not closed",
+                    status="not_confirmed",
+                    detail=f"sweep invalidated — live candle reclaimed {format_price_2(swept_price)}",
                 )
+
+        level_label = liquidity_level_label(closed_swept_level)
+        return make_factor(
+            key="liquidity_sweep",
+            label="Liquidity sweep",
+            status="confirmed",
+            points=liquidity_level_points(closed_swept_level),
+            detail=f"closed: swept {level_label} {format_price_2(swept_price)} and closed back below",
+        )
+
+    # Live sweep candidate. Do not mark it as confirmed.
+    if live_index is not None and closed_index is not None and live_index != closed_index:
+        live_levels = build_liquidity_levels_for_candidate(df, live_index, df_4h=df_4h)
+
+        if live_levels:
+            checked_any = True
+
+        live_swept_level = select_best_swept_level(live_candle, live_levels)
+
+        if live_swept_level is not None:
+            swept_price = float(live_swept_level["price"])
+            level_label = liquidity_level_label(live_swept_level)
+            return make_factor(
+                key="liquidity_sweep",
+                label="Liquidity sweep",
+                status="candidate",
+                points=0,
+                detail=f"live: swept {level_label} {format_price_2(swept_price)}, candle not closed",
+            )
 
     if checked_any:
         return make_factor(
             key="liquidity_sweep",
             label="Liquidity sweep",
             status="not_confirmed",
-            detail="1H: no 12H/24H sweep",
+            detail="no valid 1H/4H sweep",
         )
 
     return make_factor(
         key="liquidity_sweep",
         label="Liquidity sweep",
-        status="not_enough_data",
-        detail="1H: insufficient 12H/24H history",
+        status="not_confirmed",
+        detail="no valid 1H/4H liquidity sweep",
     )
 
 
@@ -878,7 +1307,7 @@ def analyze_short_factors(df_1h, df_4h=None):
     premium_factor = detect_premium_zone(df_1h, df_4h)
 
     factors = [
-        detect_liquidity_sweep(df_1h),
+        detect_liquidity_sweep(df_1h, df_4h=df_4h),
         premium_factor,
         detect_local_high_update(df_1h),
         detect_rejection_candle(df_1h),
