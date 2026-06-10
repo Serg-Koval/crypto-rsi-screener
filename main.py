@@ -42,6 +42,8 @@ MIN_VOLUME_USD_24H = 5_000_000
 # Short-analysis settings based on 1H OHLCV only.
 LIQUIDITY_SWEEP_LOOKBACK = 30
 PREMIUM_ZONE_LOOKBACK = 72
+PREMIUM_ZONE_LOOKBACK_1H = 72
+PREMIUM_ZONE_LOOKBACK_4H = 42
 LOCAL_HIGH_LOOKBACKS = {
     "24H": 24,
     "48H": 48,
@@ -305,59 +307,121 @@ def detect_liquidity_sweep(df_1h, lookback=LIQUIDITY_SWEEP_LOOKBACK):
     )
 
 
-def detect_premium_zone(df_1h, lookback=PREMIUM_ZONE_LOOKBACK):
-    if df_1h is None or df_1h.empty or len(df_1h) < lookback + 1:
-        return make_factor(
-            key="premium_zone",
-            label="Premium zone",
-            status="not_enough_data",
-            detail=f"requires {lookback + 1} 1H candles",
-        )
+def classify_premium_position(position):
+    if position is None or pd.isna(position):
+        return "N/A"
 
-    df = df_1h.copy().reset_index(drop=True)
-    current = df.iloc[-1]
-    previous = df.iloc[-(lookback + 1):-1]
+    position = float(position)
+
+    if position >= 0.786:
+        return "Extreme Premium"
+
+    if position >= 0.618:
+        return "Premium"
+
+    if position <= 0.382:
+        return "Discount"
+
+    return "Neutral"
+
+
+def calculate_premium_position(df, lookback):
+    if df is None or df.empty or len(df) < lookback + 1:
+        return {
+            "status": "not_enough_data",
+            "position": None,
+            "label": "N/A",
+            "detail": f"requires {lookback + 1} candles",
+        }
+
+    work_df = df.copy().reset_index(drop=True)
+    current = work_df.iloc[-1]
+    previous = work_df.iloc[-(lookback + 1):-1]
 
     range_low = float(previous["low"].min())
     range_high = float(previous["high"].max())
     current_price = float(current["close"])
-
     range_size = range_high - range_low
 
     if range_size <= 0:
-        return make_factor(
-            key="premium_zone",
-            label="Premium zone",
-            status="not_enough_data",
-            detail="invalid range",
-        )
+        return {
+            "status": "not_enough_data",
+            "position": None,
+            "label": "N/A",
+            "detail": "invalid range",
+        }
 
     position = (current_price - range_low) / range_size
+    label = classify_premium_position(position)
 
-    if position >= 0.786:
-        return make_factor(
-            key="premium_zone",
-            label="Premium zone",
-            status="confirmed",
-            points=2,
-            detail=f"extreme premium {position:.2f}",
-        )
+    return {
+        "status": "ok",
+        "position": float(position),
+        "label": label,
+        "detail": f"{label} {position:.2f}",
+    }
 
-    if position >= 0.618:
-        return make_factor(
-            key="premium_zone",
-            label="Premium zone",
-            status="confirmed",
-            points=1,
-            detail=f"premium {position:.2f}",
-        )
 
-    return make_factor(
+def detect_premium_zone(
+    df_1h,
+    df_4h=None,
+    lookback_1h=PREMIUM_ZONE_LOOKBACK_1H,
+    lookback_4h=PREMIUM_ZONE_LOOKBACK_4H,
+):
+    premium_1h = calculate_premium_position(df_1h, lookback_1h)
+    premium_4h = calculate_premium_position(df_4h, lookback_4h) if df_4h is not None else {
+        "status": "not_enough_data",
+        "position": None,
+        "label": "N/A",
+        "detail": "4H candles unavailable",
+    }
+
+    labels = []
+    points = 0
+    confirmed = False
+    not_enough_data = True
+
+    for tf, item in [("1H", premium_1h), ("4H", premium_4h)]:
+        status = item.get("status")
+        label = item.get("label", "N/A")
+        position = item.get("position")
+
+        if status == "ok":
+            not_enough_data = False
+
+            if position is not None and not pd.isna(position):
+                labels.append(f"{tf}: {label} / {float(position):.2f}")
+            else:
+                labels.append(f"{tf}: {label}")
+
+            if label == "Extreme Premium":
+                points += 2
+                confirmed = True
+            elif label == "Premium":
+                points += 1
+                confirmed = True
+        else:
+            labels.append(f"{tf}: N/A")
+
+    # Premium should matter, but should not dominate the setup score by itself.
+    points = min(points, 3)
+
+    detail = " | ".join(labels)
+
+    factor = make_factor(
         key="premium_zone",
         label="Premium zone",
-        status="not_confirmed",
-        detail=f"position {position:.2f}",
+        status="confirmed" if confirmed else ("not_enough_data" if not_enough_data else "not_confirmed"),
+        points=points,
+        detail=detail,
     )
+
+    factor["premium_1h_label"] = premium_1h.get("label", "N/A")
+    factor["premium_1h_position"] = premium_1h.get("position")
+    factor["premium_4h_label"] = premium_4h.get("label", "N/A")
+    factor["premium_4h_position"] = premium_4h.get("position")
+
+    return factor
 
 
 def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
@@ -488,10 +552,12 @@ def detect_rejection_candle(
     )
 
 
-def analyze_short_factors(df_1h):
+def analyze_short_factors(df_1h, df_4h=None):
+    premium_factor = detect_premium_zone(df_1h, df_4h)
+
     factors = [
         detect_liquidity_sweep(df_1h),
-        detect_premium_zone(df_1h),
+        premium_factor,
         detect_local_high_update(df_1h),
         detect_rejection_candle(df_1h),
     ]
@@ -505,6 +571,7 @@ def analyze_short_factors(df_1h):
         "score": score,
         "confirmed_count": confirmed_count,
         "total_count": total_count,
+        "premium_factor": premium_factor,
     }
 
 
@@ -901,7 +968,7 @@ def okx_analyze_candidate(inst_id, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    short_analysis = analyze_short_factors(df_1h)
+    short_analysis = analyze_short_factors(df_1h, df_4h)
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -1260,7 +1327,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    short_analysis = analyze_short_factors(df_1h)
+    short_analysis = analyze_short_factors(df_1h, df_4h)
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -1667,6 +1734,9 @@ def short_factor_line(factor):
     label = str(factor.get("label", "Unknown factor"))
     detail = str(factor.get("detail", "")).strip()
 
+    if factor.get("key") == "premium_zone":
+        return format_premium_line_from_factors([factor])["premium_factor_line"]
+
     if status == "confirmed":
         icon = "✅"
     elif status == "not_enough_data":
@@ -1686,13 +1756,147 @@ def format_short_factors_for_telegram(factors):
 
     return [short_factor_line(factor) for factor in factors]
 
+def find_factor(factors, key):
+    if not factors:
+        return None
+
+    for factor in factors:
+        if factor.get("key") == key:
+            return factor
+
+    return None
+
+
+def format_premium_line_from_factors(factors):
+    factor = find_factor(factors, "premium_zone")
+
+    if not factor:
+        return {
+            "premium_1h": "N/A",
+            "premium_4h": "N/A",
+            "premium_factor_line": "⚪ Premium zone — data unavailable",
+        }
+
+    label_1h = str(factor.get("premium_1h_label", "N/A"))
+    label_4h = str(factor.get("premium_4h_label", "N/A"))
+    position_1h = factor.get("premium_1h_position")
+    position_4h = factor.get("premium_4h_position")
+
+    if position_1h is not None and not pd.isna(position_1h):
+        premium_1h = f"{label_1h} / {float(position_1h):.2f}"
+    else:
+        premium_1h = label_1h
+
+    if position_4h is not None and not pd.isna(position_4h):
+        premium_4h = f"{label_4h} / {float(position_4h):.2f}"
+    else:
+        premium_4h = label_4h
+
+    if factor.get("status") == "confirmed":
+        icon = "✅"
+    elif factor.get("status") == "not_enough_data":
+        icon = "⚪"
+    else:
+        icon = "❌"
+
+    return {
+        "premium_1h": premium_1h,
+        "premium_4h": premium_4h,
+        "premium_factor_line": f"{icon} Premium zone — 1H: {label_1h} | 4H: {label_4h}",
+    }
+
+
+def quality_pump_label(score):
+    score = int(score or 0)
+
+    if score >= 3:
+        return "Extreme"
+    if score == 2:
+        return "Strong"
+    if score == 1:
+        return "Mild"
+    return "None"
+
+
+def quality_heat_label(score):
+    score = int(score or 0)
+
+    if score >= 4:
+        return "Strong"
+    if score >= 2:
+        return "Moderate"
+    if score == 1:
+        return "Mild"
+    return "None"
+
+
+def quality_volume_label(score):
+    score = int(score or 0)
+
+    if score >= 4:
+        return "Strong spike"
+    if score >= 3:
+        return "Strong spike"
+    if score == 2:
+        return "Strong"
+    if score == 1:
+        return "Normal"
+    return "Weak"
+
+
+def quality_setup_label(score, confirmed_count, total_count):
+    score = int(score or 0)
+    confirmed_count = int(confirmed_count or 0)
+    total_count = int(total_count or 0)
+
+    if score >= 5:
+        level = "Strong"
+    elif score >= 3:
+        level = "Moderate"
+    elif score >= 1:
+        level = "Weak"
+    else:
+        level = "None"
+
+    return f"{level} — {confirmed_count}/{total_count} factors"
+
+
+def quality_priority_label(signal_level):
+    mapping = {
+        "HIGH_PRIORITY_SHORT_WATCH": "Critical",
+        "SHORT_WATCH": "High",
+        "OVERHEAT_WATCH": "Medium",
+        "PUMP_WATCH": "Low",
+        "NO_SIGNAL": "None",
+    }
+
+    return mapping.get(str(signal_level), "None")
+
+
+def build_quality_labels(detail):
+    pump_score = int(detail.get("pump_score", 0))
+    rsi_score = int(detail.get("rsi_score", 0))
+    volume_score = int(detail.get("volume_score", 0))
+    short_setup_score = int(detail.get("short_setup_score", 0))
+    confirmed_count = int(detail.get("confirmed_short_factors_count", 0))
+    total_count = int(detail.get("total_short_factors_count", 0))
+    signal_level = str(detail.get("signal_level", "NO_SIGNAL"))
+
+    return {
+        "pump_quality": quality_pump_label(pump_score),
+        "heat_quality": quality_heat_label(rsi_score),
+        "volume_quality": quality_volume_label(volume_score),
+        "setup_quality": quality_setup_label(short_setup_score, confirmed_count, total_count),
+        "priority_quality": quality_priority_label(signal_level),
+    }
+
 
 def classify_rsi_only_signal(row):
     """
-    Baseline RSI/pump-only classification for testing and visual comparison.
+    Heat-only calibration classification.
 
-    This intentionally ignores short setup factors and scoring.
-    It answers: "Is the pair overheated by RSI/pump logic only?"
+    This block ignores short-factor confirmation.
+    It answers: "Why is this asset on the radar by pump / RSI / volume context?"
     """
 
     rsi_1h_live = float(row.get("rsi_1h_live", np.nan))
@@ -1701,6 +1905,7 @@ def classify_rsi_only_signal(row):
     price_change_24h = float(row.get("price_change_24h_percent", np.nan))
     volume_24h = row.get("volume_usd_24h_exact", np.nan)
     volume_change_24h = row.get("volume_change_24h_percent", np.nan)
+    main_signal_level = str(row.get("signal_level", "NO_SIGNAL"))
 
     volume_ok = (
         volume_24h is not None and
@@ -1710,7 +1915,7 @@ def classify_rsi_only_signal(row):
 
     if not volume_ok:
         return {
-            "rsi_only_level": "NO_RSI_SIGNAL",
+            "rsi_only_level": "NO_HEAT_SIGNAL",
             "rsi_only_rank": 0,
             "rsi_only_reason": "24h volume below minimum",
         }
@@ -1719,90 +1924,84 @@ def classify_rsi_only_signal(row):
     if volume_change_24h is not None and not pd.isna(volume_change_24h):
         vol_chg = float(volume_change_24h)
 
-    extreme_conditions = [
-        rsi_1h_live >= EXTREME_PUMP_RSI_1H_LIVE,
-        rsi_4h_live >= EXTREME_PUMP_RSI_4H_LIVE,
-        price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H,
-        vol_chg is not None and vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H,
-    ]
+    reason_parts = []
 
-    if all(extreme_conditions):
-        reason_parts = [
-            f"RSI 1H live >= {EXTREME_PUMP_RSI_1H_LIVE}",
-            f"RSI 4H live >= {EXTREME_PUMP_RSI_4H_LIVE}",
-            f"24h change >= {EXTREME_PUMP_PRICE_CHANGE_24H}%",
-            f"volume change >= {EXTREME_PUMP_VOLUME_CHANGE_24H}%",
-        ]
+    if main_signal_level != "NO_SIGNAL":
+        reason_parts.append(f"score-model level {main_signal_level}")
 
+    if rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE:
+        reason_parts.append(f"RSI 1H live >= {EARLY_PUMP_RSI_1H_LIVE}")
+
+    if rsi_4h_live >= ACTIVE_OVERHEAT_RSI_4H_LIVE:
+        reason_parts.append(f"RSI 4H live >= {ACTIVE_OVERHEAT_RSI_4H_LIVE}")
+
+    if price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H:
+        reason_parts.append(f"24h change >= {EXTREME_PUMP_PRICE_CHANGE_24H}%")
+
+    if vol_chg is not None and vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H:
+        reason_parts.append(f"volume change >= {EXTREME_PUMP_VOLUME_CHANGE_24H}%")
+
+    has_extreme_heat = (
+        rsi_1h_live >= EXTREME_PUMP_RSI_1H_LIVE and
+        rsi_4h_live >= EXTREME_PUMP_RSI_4H_LIVE and
+        price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H and
+        vol_chg is not None and
+        vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H
+    )
+
+    if has_extreme_heat:
         if rsi_1h_closed >= RSI_1H_CLOSED_CONFIRMATION:
             reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
 
         return {
-            "rsi_only_level": "EXTREME_PUMP",
+            "rsi_only_level": "EXTREME_HEAT",
             "rsi_only_rank": 3,
             "rsi_only_reason": " + ".join(reason_parts),
         }
 
-    active_conditions = [
-        rsi_1h_live >= ACTIVE_OVERHEAT_RSI_1H_LIVE,
-        rsi_4h_live >= ACTIVE_OVERHEAT_RSI_4H_LIVE,
-        price_change_24h >= ACTIVE_OVERHEAT_PRICE_CHANGE_24H,
-        vol_chg is not None and vol_chg >= ACTIVE_OVERHEAT_VOLUME_CHANGE_24H,
-    ]
+    has_active_heat = (
+        rsi_4h_live >= ACTIVE_OVERHEAT_RSI_4H_LIVE or
+        rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE
+    ) and (
+        price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H or
+        (vol_chg is not None and vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H)
+    )
 
-    if all(active_conditions):
-        reason_parts = [
-            f"RSI 1H live >= {ACTIVE_OVERHEAT_RSI_1H_LIVE}",
-            f"RSI 4H live >= {ACTIVE_OVERHEAT_RSI_4H_LIVE}",
-            f"24h change >= {ACTIVE_OVERHEAT_PRICE_CHANGE_24H}%",
-            f"volume change >= {ACTIVE_OVERHEAT_VOLUME_CHANGE_24H}%",
-        ]
-
-        if rsi_1h_closed >= RSI_1H_CLOSED_CONFIRMATION:
-            reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
-
+    if has_active_heat:
         return {
-            "rsi_only_level": "ACTIVE_OVERHEAT",
+            "rsi_only_level": "ACTIVE_HEAT",
             "rsi_only_rank": 2,
             "rsi_only_reason": " + ".join(reason_parts),
         }
 
-    early_conditions = [
-        rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE,
-        price_change_24h >= EARLY_PUMP_PRICE_CHANGE_24H,
-    ]
+    has_pump_context = (
+        main_signal_level != "NO_SIGNAL" or
+        rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE or
+        rsi_4h_live >= ACTIVE_OVERHEAT_RSI_4H_LIVE or
+        price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H or
+        (vol_chg is not None and vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H)
+    )
 
-    if all(early_conditions):
-        reason_parts = [
-            f"RSI 1H live >= {EARLY_PUMP_RSI_1H_LIVE}",
-            f"24h change >= {EARLY_PUMP_PRICE_CHANGE_24H}%",
-        ]
-
-        if rsi_1h_closed >= RSI_1H_CLOSED_CONFIRMATION:
-            reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
-
-        if vol_chg is not None and vol_chg >= ACTIVE_OVERHEAT_VOLUME_CHANGE_24H:
-            reason_parts.append(f"volume change >= {ACTIVE_OVERHEAT_VOLUME_CHANGE_24H}%")
-
+    if has_pump_context:
         return {
-            "rsi_only_level": "EARLY_PUMP",
+            "rsi_only_level": "PUMP_CONTEXT",
             "rsi_only_rank": 1,
-            "rsi_only_reason": " + ".join(reason_parts),
+            "rsi_only_reason": " + ".join(reason_parts) if reason_parts else "pump / heat context",
         }
 
     return {
-        "rsi_only_level": "NO_RSI_SIGNAL",
+        "rsi_only_level": "NO_HEAT_SIGNAL",
         "rsi_only_rank": 0,
-        "rsi_only_reason": "RSI-only filters not passed",
+        "rsi_only_reason": "heat filters not passed",
     }
 
 
 def rsi_only_signal_label(signal_level):
     labels = {
-        "EXTREME_PUMP": "🔴 EXTREME PUMP",
-        "ACTIVE_OVERHEAT": "🟠 ACTIVE OVERHEAT",
-        "EARLY_PUMP": "🟡 EARLY PUMP",
-        "NO_RSI_SIGNAL": "⚪ NO RSI SIGNAL",
+        "EXTREME_HEAT": "🔴 EXTREME HEAT",
+        "ACTIVE_HEAT": "🟠 ACTIVE HEAT",
+        "PUMP_CONTEXT": "🟡 PUMP CONTEXT",
+        "NO_HEAT_SIGNAL": "⚪ NO HEAT SIGNAL",
     }
 
     return labels.get(signal_level, signal_level)
@@ -1810,7 +2009,7 @@ def rsi_only_signal_label(signal_level):
 
 def prepare_grouped_rsi_only_signals(df_all, max_groups=RSI_ONLY_TOP_N):
     """
-    Prepare a second comparison block based only on RSI/pump logic.
+    Prepare a second comparison block based on heat indicators only.
 
     Uses all analyzed prefiltered candidates, including those that did not pass
     the short-score watch classification.
@@ -1826,7 +2025,7 @@ def prepare_grouped_rsi_only_signals(df_all, max_groups=RSI_ONLY_TOP_N):
     df["rsi_only_rank"] = classifications.apply(lambda item: item["rsi_only_rank"])
     df["rsi_only_reason"] = classifications.apply(lambda item: item["rsi_only_reason"])
 
-    df = df[df["rsi_only_level"] != "NO_RSI_SIGNAL"].copy()
+    df = df[df["rsi_only_level"] != "NO_HEAT_SIGNAL"].copy()
 
     if df.empty:
         return []
@@ -1877,6 +2076,11 @@ def prepare_grouped_rsi_only_signals(df_all, max_groups=RSI_ONLY_TOP_N):
             "confirmed_short_factors_count": int(display_row.get("confirmed_short_factors_count", 0)),
             "total_short_factors_count": int(display_row.get("total_short_factors_count", 0)),
             "main_signal_level": str(display_row.get("signal_level", "NO_SIGNAL")),
+            "pump_score": int(display_row.get("pump_score", 0)),
+            "rsi_score": int(display_row.get("rsi_score", 0)),
+            "volume_score": int(display_row.get("volume_score", 0)),
+            "short_setup_score": int(display_row.get("short_setup_score", 0)),
+            "short_factors": display_row.get("short_factors", []),
             "best_rsi_only_rank": int(top_row["rsi_only_rank"]),
             "best_rsi_4h_live": float(group_sorted["rsi_4h_live"].max()),
             "best_rsi_1h_live": float(group_sorted["rsi_1h_live"].max()),
@@ -1914,24 +2118,22 @@ def format_multi_provider_telegram(
     """
     Test-mode Telegram report with two blocks:
     1. short-score analysis;
-    2. RSI indicators only baseline.
-
-    This is intentionally more verbose for manual calibration.
+    2. heat indicators only calibration.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
 
     lines = []
 
-    lines.append("🚨 <b>Multi-Exchange RSI Screener</b>")
+    lines.append("📊 <b>Market Heat Scanner</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
     lines.append("")
 
     short_count = len(grouped_signals) if grouped_signals else 0
-    rsi_count = len(grouped_rsi_only_signals) if grouped_rsi_only_signals else 0
+    heat_count = len(grouped_rsi_only_signals) if grouped_rsi_only_signals else 0
 
     lines.append(f"Block 1 — Short score analysis: <b>{short_count}</b>")
-    lines.append(f"Block 2 — RSI indicators only: <b>{rsi_count}</b>")
+    lines.append(f"Block 2 — Heat indicators only: <b>{heat_count}</b>")
     lines.append("")
     lines.append("━━━━━━━━━━━━")
     lines.append("<b>Block 1 — Short score analysis</b>")
@@ -1955,13 +2157,10 @@ def format_multi_provider_telegram(
             vol_24h = html.escape(str(detail.get("vol_24h", "N/A")))
             vol_chg = html.escape(str(detail.get("vol_chg_24h_%", "N/A")))
 
-            pump_score = int(detail.get("pump_score", 0))
-            rsi_score = int(detail.get("rsi_score", 0))
-            volume_score = int(detail.get("volume_score", 0))
-            short_setup_score = int(detail.get("short_setup_score", 0))
-            final_score = int(detail.get("final_score", 0))
-
             short_factors = detail.get("short_factors", []) or []
+            premium_info = format_premium_line_from_factors(short_factors)
+            quality = build_quality_labels(detail)
+
             confirmed_count = int(detail.get("confirmed_short_factors_count", 0))
             total_count = int(detail.get("total_short_factors_count", len(short_factors)))
 
@@ -1976,12 +2175,17 @@ def format_multi_provider_telegram(
             lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
 
             lines.append("")
-            lines.append("<b>Scores:</b>")
-            lines.append(f"Pump: <code>{pump_score}</code>")
-            lines.append(f"RSI: <code>{rsi_score}</code>")
-            lines.append(f"Volume: <code>{volume_score}</code>")
-            lines.append(f"Short setup: <code>{short_setup_score}</code>")
-            lines.append(f"Final: <code>{final_score}</code>")
+            lines.append("<b>Premium / Discount:</b>")
+            lines.append(f"1H: <code>{html.escape(premium_info['premium_1h'])}</code>")
+            lines.append(f"4H: <code>{html.escape(premium_info['premium_4h'])}</code>")
+
+            lines.append("")
+            lines.append("<b>Signal quality:</b>")
+            lines.append(f"Pump: <code>{html.escape(quality['pump_quality'])}</code>")
+            lines.append(f"RSI heat: <code>{html.escape(quality['heat_quality'])}</code>")
+            lines.append(f"Volume: <code>{html.escape(quality['volume_quality'])}</code>")
+            lines.append(f"Short setup: <code>{html.escape(quality['setup_quality'])}</code>")
+            lines.append(f"Priority: <code>{html.escape(quality['priority_quality'])}</code>")
 
             lines.append("")
             lines.append(f"<b>Short factors:</b> <code>{confirmed_count}/{total_count}</code>")
@@ -2001,14 +2205,14 @@ def format_multi_provider_telegram(
 
     lines.append("")
     lines.append("━━━━━━━━━━━━")
-    lines.append("<b>Block 2 — RSI indicators only</b>")
+    lines.append("<b>Block 2 — Heat indicators only</b>")
     lines.append("━━━━━━━━━━━━")
     lines.append("")
     lines.append("This block ignores short-factor confirmation and is shown for calibration.")
     lines.append("")
 
     if not grouped_rsi_only_signals:
-        lines.append("✅ No RSI-only pump signals.")
+        lines.append("✅ No heat-indicator signals.")
     else:
         for idx, group in enumerate(grouped_rsi_only_signals):
             signal_label = rsi_only_signal_label(group["rsi_only_level"])
@@ -2020,11 +2224,18 @@ def format_multi_provider_telegram(
             chg_24h = html.escape(str(group.get("chg_24h_%", "N/A")))
             vol_24h = html.escape(str(group.get("vol_24h", "N/A")))
             vol_chg = html.escape(str(group.get("vol_chg_24h_%", "N/A")))
-            short_score = int(group.get("short_setup_score", 0))
             confirmed_count = int(group.get("confirmed_short_factors_count", 0))
             total_count = int(group.get("total_short_factors_count", 0))
             main_signal_level = html.escape(str(group.get("main_signal_level", "NO_SIGNAL")))
             reason = html.escape(str(group.get("rsi_only_reason", "N/A")))
+
+            quality = {
+                "pump_quality": quality_pump_label(group.get("pump_score", 0)),
+                "heat_quality": quality_heat_label(group.get("rsi_score", 0)),
+                "volume_quality": quality_volume_label(group.get("volume_score", 0)),
+                "setup_quality": quality_setup_label(group.get("short_setup_score", 0), confirmed_count, total_count),
+                "priority_quality": quality_priority_label(group.get("main_signal_level", "NO_SIGNAL")),
+            }
 
             lines.append(f"{idx + 1}) {signal_label}")
             lines.append(f"📌 <b>{symbol}</b>")
@@ -2033,7 +2244,8 @@ def format_multi_provider_telegram(
             lines.append(f"📊 RSI 4H live: <code>{rsi_4h_live}</code>")
             lines.append(f"📈 24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
             lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
-            lines.append(f"Short factors: <code>{confirmed_count}/{total_count}</code> | Short setup score: <code>{short_score}</code>")
+            lines.append(f"Heat: <code>{html.escape(quality['heat_quality'])}</code> | Pump: <code>{html.escape(quality['pump_quality'])}</code> | Volume: <code>{html.escape(quality['volume_quality'])}</code>")
+            lines.append(f"Short setup: <code>{html.escape(quality['setup_quality'])}</code>")
             lines.append(f"Score-model level: <code>{main_signal_level}</code>")
             lines.append(f"Reason: <i>{reason}</i>")
 
