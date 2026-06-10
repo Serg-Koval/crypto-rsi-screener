@@ -19,25 +19,27 @@ KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 RSI_PERIOD = 14
 
-# New pump-detection thresholds.
+# Watch thresholds.
 # Closed 4H RSI is intentionally not used in signal classification.
 EARLY_PUMP_RSI_1H_LIVE = 82
 EARLY_PUMP_PRICE_CHANGE_24H = 8
 
-ACTIVE_OVERHEAT_RSI_1H_LIVE = 82
-ACTIVE_OVERHEAT_RSI_4H_LIVE = 75
-ACTIVE_OVERHEAT_PRICE_CHANGE_24H = 10
-ACTIVE_OVERHEAT_VOLUME_CHANGE_24H = 50
+PUMP_WATCH_PRICE_CHANGE_24H = 10
+
+OVERHEAT_WATCH_RSI_1H_LIVE = 82
+OVERHEAT_WATCH_RSI_1H_CLOSED = 80
+OVERHEAT_WATCH_PRICE_CHANGE_24H = 15
+OVERHEAT_WATCH_MIN_VOLUME_USD_24H = 5_000_000
 
 EXTREME_PUMP_RSI_1H_LIVE = 85
 EXTREME_PUMP_RSI_4H_LIVE = 80
 EXTREME_PUMP_PRICE_CHANGE_24H = 20
 EXTREME_PUMP_VOLUME_CHANGE_24H = 100
 
-RSI_1H_CLOSED_CONFIRMATION = 80
+RSI_1H_CLOSED_CONFIRMATION = OVERHEAT_WATCH_RSI_1H_CLOSED
 
 MIN_PRICE_CHANGE_24H = EARLY_PUMP_PRICE_CHANGE_24H
-MIN_VOLUME_USD_24H = 5_000_000
+MIN_VOLUME_USD_24H = OVERHEAT_WATCH_MIN_VOLUME_USD_24H
 
 # Short-analysis settings based on 1H OHLCV only.
 LIQUIDITY_SWEEP_LOOKBACKS = {
@@ -58,8 +60,6 @@ REJECTION_VOLUME_MULTIPLIER = 1.5
 
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
-RSI_ONLY_TOP_N = 20
-
 CANDLE_LIMIT_1H = 500
 CANDLE_LIMIT_4H = 500
 
@@ -240,6 +240,60 @@ def parse_float_from_value(value):
 
     except Exception:
         return None
+
+
+def safe_float(value, default=np.nan):
+    try:
+        if value is None or pd.isna(value):
+            return default
+
+        return float(value)
+
+    except Exception:
+        return default
+
+
+def detect_overheat_watch_context(
+    rsi_1h_live,
+    rsi_1h_closed,
+    exact_volume_24h,
+    price_change_24h,
+):
+    rsi_1h_live_value = safe_float(rsi_1h_live)
+    rsi_1h_closed_value = safe_float(rsi_1h_closed)
+    volume_24h_value = safe_float(exact_volume_24h)
+    price_change_24h_value = safe_float(price_change_24h)
+
+    checks = [
+        (
+            rsi_1h_live_value >= OVERHEAT_WATCH_RSI_1H_LIVE,
+            f"RSI 1H live >= {OVERHEAT_WATCH_RSI_1H_LIVE}",
+        ),
+        (
+            rsi_1h_closed_value >= OVERHEAT_WATCH_RSI_1H_CLOSED,
+            f"RSI 1H closed >= {OVERHEAT_WATCH_RSI_1H_CLOSED}",
+        ),
+        (
+            price_change_24h_value >= OVERHEAT_WATCH_PRICE_CHANGE_24H,
+            f"24h change >= {OVERHEAT_WATCH_PRICE_CHANGE_24H}%",
+        ),
+        (
+            volume_24h_value >= OVERHEAT_WATCH_MIN_VOLUME_USD_24H,
+            f"24h volume >= {format_large_number(OVERHEAT_WATCH_MIN_VOLUME_USD_24H)}",
+        ),
+    ]
+
+    passed = [label for ok, label in checks if ok]
+    missing = [label for ok, label in checks if not ok]
+
+    is_overheat = len(missing) == 0
+
+    return {
+        "is_overheat": is_overheat,
+        "passed": passed,
+        "missing": missing,
+        "reason": " + ".join(passed) if is_overheat else "Missing " + " / ".join(missing),
+    }
 
 
 def make_factor(key, label, status, points=0, detail=""):
@@ -730,33 +784,40 @@ def calculate_scores(
     price_change_24h,
     short_setup_score,
 ):
+    rsi_1h_live_value = safe_float(rsi_1h_live)
+    rsi_1h_closed_value = safe_float(rsi_1h_closed)
+    rsi_4h_live_value = safe_float(rsi_4h_live)
+    volume_24h_value = safe_float(exact_volume_24h)
+    price_change_24h_value = safe_float(price_change_24h)
+
     pump_score = 0
 
-    if price_change_24h >= 40:
+    if price_change_24h_value >= 40:
         pump_score = 3
-    elif price_change_24h >= 20:
+    elif price_change_24h_value >= EXTREME_PUMP_PRICE_CHANGE_24H:
         pump_score = 2
-    elif price_change_24h >= 10:
+    elif price_change_24h_value >= PUMP_WATCH_PRICE_CHANGE_24H:
         pump_score = 1
 
     rsi_score = 0
 
-    if rsi_1h_live >= 85:
+    if rsi_1h_live_value >= EXTREME_PUMP_RSI_1H_LIVE:
         rsi_score += 2
-    elif rsi_1h_live >= 82:
+    elif rsi_1h_live_value >= OVERHEAT_WATCH_RSI_1H_LIVE:
         rsi_score += 1
 
-    if rsi_4h_live >= 80:
+    if rsi_4h_live_value >= EXTREME_PUMP_RSI_4H_LIVE:
         rsi_score += 2
-    elif rsi_4h_live >= 75:
+    elif rsi_4h_live_value >= 75:
         rsi_score += 1
 
-    if rsi_1h_closed >= 80:
+    if rsi_1h_closed_value >= RSI_1H_CLOSED_CONFIRMATION:
         rsi_score += 1
 
     volume_score = 0
+    volume_ok = volume_24h_value >= MIN_VOLUME_USD_24H
 
-    if exact_volume_24h is not None and not pd.isna(exact_volume_24h) and exact_volume_24h >= MIN_VOLUME_USD_24H:
+    if volume_ok:
         volume_score += 1
 
     vol_chg = None if volume_change_24h is None or pd.isna(volume_change_24h) else float(volume_change_24h)
@@ -769,6 +830,28 @@ def calculate_scores(
         elif vol_chg >= 50:
             volume_score += 1
 
+    overheat_context = detect_overheat_watch_context(
+        rsi_1h_live=rsi_1h_live_value,
+        rsi_1h_closed=rsi_1h_closed_value,
+        exact_volume_24h=volume_24h_value,
+        price_change_24h=price_change_24h_value,
+    )
+
+    has_basic_pump_context = (
+        price_change_24h_value >= PUMP_WATCH_PRICE_CHANGE_24H and
+        volume_ok
+    )
+
+    has_strong_pump_context = (
+        price_change_24h_value >= EXTREME_PUMP_PRICE_CHANGE_24H and
+        volume_ok
+    )
+
+    has_extreme_pump_context = (
+        price_change_24h_value >= 40 and
+        volume_ok
+    )
+
     final_score = pump_score + rsi_score + volume_score + short_setup_score
 
     return {
@@ -777,6 +860,12 @@ def calculate_scores(
         "volume_score": volume_score,
         "short_setup_score": int(short_setup_score),
         "final_score": int(final_score),
+        "volume_ok": bool(volume_ok),
+        "has_basic_pump_context": bool(has_basic_pump_context),
+        "has_strong_pump_context": bool(has_strong_pump_context),
+        "has_extreme_pump_context": bool(has_extreme_pump_context),
+        "has_overheat_context": bool(overheat_context["is_overheat"]),
+        "overheat_reason": str(overheat_context["reason"]),
     }
 
 
@@ -878,11 +967,14 @@ def quality_trigger_label_from_context(context):
 def build_setup_status(signal_level, scores, short_factors):
     rsi_score = int(scores.get("rsi_score", 0))
     context = calculate_location_trigger_context(short_factors)
+    location_score = int(context.get("location_score", 0))
     trigger_count = int(context.get("trigger_count", 0))
     rejection_confirmed = bool(context.get("rejection_confirmed"))
+    liquidity_candidate = bool(context.get("liquidity_candidate"))
+    has_overheat_context = bool(scores.get("has_overheat_context", False))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        return "High priority watch — heat, location, and 1H trigger confirmation are aligned"
+        return "High priority watch — strong heat, premium/location, and confirmed 1H trigger are aligned"
 
     if signal_level == "SHORT_WATCH":
         if trigger_count >= 2:
@@ -892,16 +984,21 @@ def build_setup_status(signal_level, scores, short_factors):
         return "Short watch — 1H liquidity sweep detected, rejection still missing"
 
     if signal_level == "OVERHEAT_WATCH":
-        return "Heat watch — RSI heat is present, but 1H short trigger is not confirmed"
+        if location_score > 0:
+            return "Overheat watch — RSI heat confirmed; waiting for confirmed 1H short trigger"
+        return "Overheat watch — RSI heat confirmed; waiting for premium/location and 1H trigger"
 
     if signal_level == "PUMP_WATCH":
         missing = []
 
-        if rsi_score < 1:
+        if rsi_score < 1 and not has_overheat_context:
             missing.append("RSI heat")
 
+        if location_score <= 0:
+            missing.append("premium/location")
+
         if trigger_count == 0:
-            if bool(context.get("liquidity_candidate")):
+            if liquidity_candidate:
                 missing.append("confirmed 1H trigger")
             else:
                 missing.append("1H short trigger")
@@ -928,10 +1025,11 @@ def build_watch_reason(signal_level, scores, short_factors):
         return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed 1H trigger"
 
     if signal_level == "SHORT_WATCH":
-        return f"{pump_quality} pump + {location_quality} location + {trigger_quality}. RSI heat: {heat_quality}"
+        pump_part = "overheat" if scores.get("has_overheat_context") else f"{pump_quality} pump"
+        return f"{pump_part} + {location_quality} location + {trigger_quality}. RSI heat: {heat_quality}"
 
     if signal_level == "OVERHEAT_WATCH":
-        return f"{pump_quality} pump + {heat_quality} RSI heat, but 1H trigger confirmation is missing"
+        return str(scores.get("overheat_reason") or f"{pump_quality} pump + {heat_quality} RSI heat")
 
     if signal_level == "PUMP_WATCH":
         base_parts = [f"{pump_quality} pump"]
@@ -949,11 +1047,14 @@ def build_watch_reason(signal_level, scores, short_factors):
 
 def classify_watch_signal(scores, short_factors=None):
     """
-    Block 1 model.
+    Short Watch Analysis model.
 
-    Key rule:
-    pump + premium/location alone is not enough.
-    A Block 1 candidate needs either RSI heat or a 1H trigger.
+    A watchlist candidate must be one of:
+    - pump context with incomplete but relevant location/heat/trigger context;
+    - overheat context based on strict RSI + 24h change + 24h volume thresholds;
+    - short-watch context with location and at least one confirmed 1H trigger.
+
+    The function does not produce execution signals.
     """
 
     short_factors = short_factors or []
@@ -964,23 +1065,40 @@ def classify_watch_signal(scores, short_factors=None):
     context = calculate_location_trigger_context(short_factors)
     location_score = int(context.get("location_score", 0))
     trigger_count = int(context.get("trigger_count", 0))
+    liquidity_candidate = bool(context.get("liquidity_candidate"))
 
-    has_pump = pump_score >= 2
-    has_location = location_score >= 2
+    premium_factor = get_short_factor(short_factors, "premium_zone") or {}
+    premium_points = int(premium_factor.get("points", 0))
+
+    has_basic_pump = bool(scores.get("has_basic_pump_context", False)) or pump_score >= 1
+    has_strong_pump = bool(scores.get("has_strong_pump_context", False)) or pump_score >= 2
+    has_extreme_pump = bool(scores.get("has_extreme_pump_context", False)) or pump_score >= 3
+    has_overheat_context = bool(scores.get("has_overheat_context", False))
+
     has_heat = rsi_score >= 1
-    has_moderate_heat = rsi_score >= 2
-    has_trigger = trigger_count >= 1
-    has_confirmed_trigger = trigger_count >= 2
+    has_strong_heat = rsi_score >= 3 or has_overheat_context
 
-    if has_pump and has_location and has_confirmed_trigger and has_moderate_heat:
+    has_location = location_score >= 2
+    has_strong_location = location_score >= 3 or premium_points >= 2
+    has_premium_context = premium_points >= 1
+
+    has_trigger = trigger_count >= 1
+
+    pump_or_overheat = has_basic_pump or has_overheat_context
+
+    if (
+        (has_extreme_pump or has_strong_pump)
+        and has_strong_heat
+        and has_premium_context
+        and has_strong_location
+        and has_trigger
+    ):
         signal_level = "HIGH_PRIORITY_SHORT_WATCH"
-    elif has_pump and has_location and has_confirmed_trigger and has_heat:
+    elif pump_or_overheat and has_location and has_trigger:
         signal_level = "SHORT_WATCH"
-    elif has_pump and has_location and has_trigger and has_moderate_heat:
-        signal_level = "SHORT_WATCH"
-    elif has_pump and has_location and has_moderate_heat:
+    elif has_overheat_context:
         signal_level = "OVERHEAT_WATCH"
-    elif has_pump and has_location and (has_heat or has_trigger):
+    elif has_basic_pump and has_location and (has_heat or liquidity_candidate):
         signal_level = "PUMP_WATCH"
     else:
         signal_level = "NO_SIGNAL"
@@ -2212,196 +2330,8 @@ def build_quality_labels(detail):
     }
 
 
-def classify_rsi_only_signal(row):
-    """
-    RSI heat monitor.
-
-    This block is intentionally stricter than the pump context block.
-    It shows only candidates with real RSI heat, while ignoring short-factor confirmation.
-    """
-
-    rsi_1h_live = float(row.get("rsi_1h_live", np.nan))
-    rsi_1h_closed = float(row.get("rsi_1h_closed", np.nan))
-    rsi_4h_live = float(row.get("rsi_4h_live", np.nan))
-    price_change_24h = float(row.get("price_change_24h_percent", np.nan))
-    volume_24h = row.get("volume_usd_24h_exact", np.nan)
-
-    volume_ok = (
-        volume_24h is not None and
-        not pd.isna(volume_24h) and
-        float(volume_24h) >= MIN_VOLUME_USD_24H
-    )
-
-    if not volume_ok:
-        return {
-            "rsi_only_level": "NO_HEAT_SIGNAL",
-            "rsi_only_rank": 0,
-            "rsi_only_reason": "24h volume below minimum",
-        }
-
-    if price_change_24h < EARLY_PUMP_PRICE_CHANGE_24H:
-        return {
-            "rsi_only_level": "NO_HEAT_SIGNAL",
-            "rsi_only_rank": 0,
-            "rsi_only_reason": f"24h change below {EARLY_PUMP_PRICE_CHANGE_24H}%",
-        }
-
-    reason_parts = []
-
-    has_rsi_heat = False
-
-    if rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE:
-        has_rsi_heat = True
-        reason_parts.append(f"RSI 1H live >= {EARLY_PUMP_RSI_1H_LIVE}")
-
-    if rsi_1h_closed >= RSI_1H_CLOSED_CONFIRMATION:
-        has_rsi_heat = True
-        reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
-
-    if rsi_4h_live >= EXTREME_PUMP_RSI_4H_LIVE:
-        has_rsi_heat = True
-        reason_parts.append(f"RSI 4H live >= {EXTREME_PUMP_RSI_4H_LIVE}")
-
-    if not has_rsi_heat:
-        return {
-            "rsi_only_level": "NO_HEAT_SIGNAL",
-            "rsi_only_rank": 0,
-            "rsi_only_reason": "RSI heat filters not passed",
-        }
-
-    if price_change_24h >= EARLY_PUMP_PRICE_CHANGE_24H:
-        reason_parts.append(f"24h change >= {EARLY_PUMP_PRICE_CHANGE_24H}%")
-
-    has_extreme_heat = (
-        rsi_1h_live >= EXTREME_PUMP_RSI_1H_LIVE and
-        rsi_4h_live >= EXTREME_PUMP_RSI_4H_LIVE
-    )
-
-    if has_extreme_heat:
-        return {
-            "rsi_only_level": "EXTREME_HEAT",
-            "rsi_only_rank": 3,
-            "rsi_only_reason": " + ".join(reason_parts),
-        }
-
-    return {
-        "rsi_only_level": "ACTIVE_HEAT",
-        "rsi_only_rank": 2,
-        "rsi_only_reason": " + ".join(reason_parts),
-    }
-
-
-def rsi_only_signal_label(signal_level):
-    labels = {
-        "EXTREME_HEAT": "🔴 EXTREME RSI HEAT",
-        "ACTIVE_HEAT": "🟠 RSI HEAT",
-        "NO_HEAT_SIGNAL": "⚪ NO RSI HEAT",
-    }
-
-    return labels.get(signal_level, signal_level)
-
-
-def prepare_grouped_rsi_only_signals(df_all, max_groups=RSI_ONLY_TOP_N):
-    """
-    Prepare a second comparison block based on heat indicators only.
-
-    Uses all analyzed prefiltered candidates, including those that did not pass
-    the short-score watch classification.
-    """
-
-    if df_all is None or df_all.empty:
-        return []
-
-    df = df_all.copy()
-
-    classifications = df.apply(lambda row: classify_rsi_only_signal(row), axis=1)
-    df["rsi_only_level"] = classifications.apply(lambda item: item["rsi_only_level"])
-    df["rsi_only_rank"] = classifications.apply(lambda item: item["rsi_only_rank"])
-    df["rsi_only_reason"] = classifications.apply(lambda item: item["rsi_only_reason"])
-
-    df = df[df["rsi_only_level"] != "NO_HEAT_SIGNAL"].copy()
-
-    if df.empty:
-        return []
-
-    df["sort_volume"] = df["volume_usd_24h_exact"].fillna(0)
-    df["sort_vol_chg"] = df["volume_change_24h_percent"].fillna(-999999)
-
-    groups = []
-
-    for symbol, group in df.groupby("symbol", sort=False):
-        group_sorted = group.sort_values(
-            by=[
-                "rsi_only_rank",
-                "rsi_4h_live",
-                "rsi_1h_live",
-                "rsi_1h_closed",
-                "price_change_24h_percent",
-                "sort_vol_chg",
-                "sort_volume",
-            ],
-            ascending=[False, False, False, False, False, False, False],
-        ).reset_index(drop=True)
-
-        # Display OKX values when available; otherwise first available exchange.
-        display_group = group_sorted.copy()
-        display_group["exchange_order"] = display_group["exchange"].apply(exchange_sort_key)
-        display_group = display_group.sort_values(
-            by=["exchange_order", "rsi_only_rank"],
-            ascending=[True, False],
-        ).reset_index(drop=True)
-
-        display_row = display_group.iloc[0]
-        top_row = group_sorted.iloc[0]
-
-        groups.append({
-            "symbol": str(symbol),
-            "rsi_only_level": str(display_row["rsi_only_level"]),
-            "rsi_only_rank": int(display_row["rsi_only_rank"]),
-            "rsi_only_reason": str(display_row["rsi_only_reason"]),
-            "price": format_price_2(display_row["price"]),
-            "rsi_1h_live": f"{float(display_row['rsi_1h_live']):.2f}",
-            "rsi_1h_closed": f"{float(display_row['rsi_1h_closed']):.2f}",
-            "rsi_4h_live": f"{float(display_row['rsi_4h_live']):.2f}",
-            "chg_24h_%": format_percent_2(display_row["price_change_24h_percent"]),
-            "vol_24h": format_large_number(display_row["volume_usd_24h_exact"]),
-            "vol_chg_24h_%": format_percent_2(display_row["volume_change_24h_percent"]),
-            "short_setup_score": int(display_row.get("short_setup_score", 0)),
-            "confirmed_short_factors_count": int(display_row.get("confirmed_short_factors_count", 0)),
-            "total_short_factors_count": int(display_row.get("total_short_factors_count", 0)),
-            "main_signal_level": str(display_row.get("signal_level", "NO_SIGNAL")),
-            "pump_score": int(display_row.get("pump_score", 0)),
-            "rsi_score": int(display_row.get("rsi_score", 0)),
-            "volume_score": int(display_row.get("volume_score", 0)),
-            "short_setup_score": int(display_row.get("short_setup_score", 0)),
-            "short_factors": display_row.get("short_factors", []),
-            "best_rsi_only_rank": int(top_row["rsi_only_rank"]),
-            "best_rsi_4h_live": float(group_sorted["rsi_4h_live"].max()),
-            "best_rsi_1h_live": float(group_sorted["rsi_1h_live"].max()),
-            "best_rsi_1h_closed": float(group_sorted["rsi_1h_closed"].max()),
-            "best_price_change_24h_percent": float(group_sorted["price_change_24h_percent"].max()),
-            "best_volume_usd_24h_exact": float(group_sorted["sort_volume"].max()),
-        })
-
-    groups = sorted(
-        groups,
-        key=lambda item: (
-            item["best_rsi_only_rank"],
-            item["best_rsi_4h_live"],
-            item["best_rsi_1h_live"],
-            item["best_rsi_1h_closed"],
-            item["best_price_change_24h_percent"],
-            item["best_volume_usd_24h_exact"],
-        ),
-        reverse=True,
-    )
-
-    return groups[:max_groups]
-
-
 def format_multi_provider_telegram(
     grouped_signals,
-    grouped_rsi_only_signals,
     okx_total,
     okx_prefiltered,
     okx_active,
@@ -2410,9 +2340,7 @@ def format_multi_provider_telegram(
     bitget_active,
 ):
     """
-    Compact test-mode Telegram report.
-    Block 1: short-score analysis.
-    Block 2: RSI heat monitor, displayed only when not empty.
+    Compact Telegram report with a single Short Watch Analysis block.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
@@ -2420,19 +2348,17 @@ def format_multi_provider_telegram(
     lines = []
 
     short_count = len(grouped_signals) if grouped_signals else 0
-    heat_count = len(grouped_rsi_only_signals) if grouped_rsi_only_signals else 0
 
     lines.append("📊 <b>Market Heat Scanner</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
-    lines.append(f"Block 1 — Short score analysis: <b>{short_count}</b>")
-    lines.append(f"Block 2 — RSI heat monitor: <b>{heat_count}</b>")
+    lines.append(f"Short Watch Analysis: <b>{short_count}</b>")
     lines.append("")
     lines.append("━━━━━━━━━━━━")
-    lines.append("<b>Block 1 — Short score analysis</b>")
+    lines.append("<b>Short Watch Analysis</b>")
     lines.append("━━━━━━━━━━━━")
 
     if not grouped_signals:
-        lines.append("✅ No short-score watch signals.")
+        lines.append("✅ No short-watch signals.")
     else:
         for idx, group in enumerate(grouped_signals):
             signal_label = telegram_signal_label(group["signal_level"])
@@ -2447,10 +2373,10 @@ def format_multi_provider_telegram(
             chg_24h = html.escape(str(detail.get("chg_24h_%", "N/A")))
             vol_24h = html.escape(str(detail.get("vol_24h", "N/A")))
             vol_chg = html.escape(str(detail.get("vol_chg_24h_%", "N/A")))
+            setup_status = html.escape(str(detail.get("setup_status", "N/A")))
 
             short_factors = detail.get("short_factors", []) or []
             premium_info = format_premium_line_from_factors(short_factors)
-            quality = build_quality_labels(detail)
 
             confirmed_count = int(detail.get("confirmed_short_factors_count", 0))
             total_count = int(detail.get("total_short_factors_count", len(short_factors)))
@@ -2462,6 +2388,7 @@ def format_multi_provider_telegram(
             lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
             lines.append(f"📊 RSI 1H L/C: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
             lines.append(f"📊 RSI 4H L: <code>{rsi_4h_live}</code>")
+            lines.append(f"🧭 <i>{setup_status}</i>")
 
             lines.append("")
             lines.append("<b>Premium / Discount:</b>")
@@ -2474,41 +2401,9 @@ def format_multi_provider_telegram(
             for factor_line in format_short_factors_for_telegram(short_factors):
                 lines.append(html.escape(factor_line))
 
-            lines.append("Planned: ⚪ Divergence | ⚪ Volume climax | ⚪ Failed breakout | ⚪ MSS")
+            lines.append("Planned: ⚪ OI/Funding | ⚪ Volume climax | ⚪ Failed breakout | ⚪ MSS | ⚪ Divergence")
 
             if idx != len(grouped_signals) - 1:
-                lines.append("")
-                lines.append("────────────")
-
-    if grouped_rsi_only_signals:
-        lines.append("")
-        lines.append("━━━━━━━━━━━━")
-        lines.append("<b>Block 2 — RSI heat monitor</b>")
-        lines.append("━━━━━━━━━━━━")
-        lines.append("This block shows RSI heat candidates only.")
-
-        for idx, group in enumerate(grouped_rsi_only_signals):
-            signal_label = rsi_only_signal_label(group["rsi_only_level"])
-            symbol = html.escape(str(group["symbol"]))
-            price = html.escape(str(group.get("price", "N/A")))
-            rsi_1h_live = html.escape(str(group.get("rsi_1h_live", "N/A")))
-            rsi_1h_closed = html.escape(str(group.get("rsi_1h_closed", "N/A")))
-            rsi_4h_live = html.escape(str(group.get("rsi_4h_live", "N/A")))
-            chg_24h = html.escape(str(group.get("chg_24h_%", "N/A")))
-            vol_24h = html.escape(str(group.get("vol_24h", "N/A")))
-            vol_chg = html.escape(str(group.get("vol_chg_24h_%", "N/A")))
-            reason = html.escape(str(group.get("rsi_only_reason", "N/A")))
-
-            lines.append("")
-            lines.append(f"{idx + 1}) {signal_label}")
-            lines.append(f"📌 <code>{symbol}</code>")
-            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code>")
-            lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
-            lines.append(f"📊 RSI 1H L/C: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
-            lines.append(f"📊 RSI 4H L: <code>{rsi_4h_live}</code>")
-            lines.append(f"Reason: <i>{reason}</i>")
-
-            if idx != len(grouped_rsi_only_signals) - 1:
                 lines.append("")
                 lines.append("────────────")
 
@@ -2574,7 +2469,6 @@ def run_multi_provider_screener():
 
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
-    grouped_rsi_only_signals = prepare_grouped_rsi_only_signals(df_all, max_groups=RSI_ONLY_TOP_N)
     df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
@@ -2590,10 +2484,9 @@ def run_multi_provider_screener():
         print("=" * 120)
         print(df_grouped_output.head(FINAL_TOP_N).to_string(index=False))
 
-    if SEND_MESSAGE_IF_NO_SIGNALS or grouped_signals or grouped_rsi_only_signals:
+    if SEND_MESSAGE_IF_NO_SIGNALS or grouped_signals:
         message = format_multi_provider_telegram(
             grouped_signals=grouped_signals,
-            grouped_rsi_only_signals=grouped_rsi_only_signals,
             okx_total=okx_total,
             okx_prefiltered=okx_prefiltered,
             okx_active=okx_active,
