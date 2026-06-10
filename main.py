@@ -17,6 +17,8 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610"
+
 RSI_PERIOD = 14
 
 # Watch thresholds.
@@ -46,6 +48,10 @@ LIQUIDITY_SWEEP_LOOKBACKS = {
     "24H": 24,
     "12H": 12,
 }
+# Require a real sweep, not a one-tick wick above the previous high.
+LIQUIDITY_SWEEP_MIN_BREAK_PCT = 0.001      # 0.10% above previous high
+LIQUIDITY_SWEEP_MIN_CLOSE_BACK_PCT = 0.0005 # 0.05% close back below previous high
+LIQUIDITY_SWEEP_LIVE_INVALIDATION_PCT = 0.0005 # current/live candle reclaimed level
 PREMIUM_ZONE_LOOKBACK = 72
 PREMIUM_ZONE_LOOKBACK_1H = 72
 PREMIUM_ZONE_LOOKBACK_4H = 42
@@ -60,6 +66,7 @@ REJECTION_VOLUME_MULTIPLIER = 1.5
 
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
+TELEGRAM_MAX_SIGNALS = 10
 CANDLE_LIMIT_1H = 500
 CANDLE_LIMIT_4H = 500
 
@@ -211,7 +218,22 @@ def format_price_2(value):
     if value is None or pd.isna(value):
         return "N/A"
 
-    return f"{float(value):.2f}"
+    value = float(value)
+    abs_value = abs(value)
+
+    if abs_value >= 100:
+        return f"{value:.2f}"
+
+    if abs_value >= 1:
+        return f"{value:.4f}"
+
+    if abs_value >= 0.01:
+        return f"{value:.5f}"
+
+    if abs_value >= 0.0001:
+        return f"{value:.8f}"
+
+    return f"{value:.10f}"
 
 
 def format_percent_2(value, show_plus=True):
@@ -391,14 +413,32 @@ def previous_high_before_index(df, candle_index, lookback):
     return float(previous["high"].max())
 
 
-def evaluate_sweep_against_previous_high(candle, previous_high):
+def evaluate_sweep_against_previous_high(
+    candle,
+    previous_high,
+    min_break_pct=LIQUIDITY_SWEEP_MIN_BREAK_PCT,
+    min_close_back_pct=LIQUIDITY_SWEEP_MIN_CLOSE_BACK_PCT,
+):
     if candle is None or previous_high is None:
         return False
 
     current_high = float(candle["high"])
     current_close = float(candle["close"])
 
-    return current_high > previous_high and current_close < previous_high
+    required_break_level = float(previous_high) * (1 + float(min_break_pct))
+    required_close_back_level = float(previous_high) * (1 - float(min_close_back_pct))
+
+    return current_high >= required_break_level and current_close <= required_close_back_level
+
+
+def is_sweep_invalidated_by_live_candle(live_candle, swept_high):
+    if live_candle is None or swept_high is None:
+        return False
+
+    live_close = float(live_candle["close"])
+    reclaim_level = float(swept_high) * (1 + LIQUIDITY_SWEEP_LIVE_INVALIDATION_PCT)
+
+    return live_close >= reclaim_level
 
 
 def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
@@ -460,12 +500,27 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
         checked_any = True
 
         if evaluate_sweep_against_previous_high(closed_candle, previous_high):
+            if live_index is not None and closed_index is not None and live_index != closed_index:
+                if is_sweep_invalidated_by_live_candle(live_candle, previous_high):
+                    return make_factor(
+                        key="liquidity_sweep",
+                        label="Liquidity sweep",
+                        status="not_confirmed",
+                        detail=(
+                            f"1H: {label} sweep invalidated — live candle reclaimed "
+                            f"{format_price_2(previous_high)}"
+                        ),
+                    )
+
             return make_factor(
                 key="liquidity_sweep",
                 label="Liquidity sweep",
                 status="confirmed",
                 points=points,
-                detail=f"1H closed: swept {label} high and closed back below",
+                detail=(
+                    f"1H closed: swept {label} high {format_price_2(previous_high)} "
+                    "and closed back below"
+                ),
             )
 
     # Live sweep candidate. Do not mark it as confirmed.
@@ -485,7 +540,7 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
                     label="Liquidity sweep",
                     status="candidate",
                     points=0,
-                    detail=f"1H live: swept {label} high, candle not closed",
+                    detail=f"1H live: swept {label} high {format_price_2(previous_high)}, candle not closed",
                 )
 
     if checked_any:
@@ -2330,6 +2385,49 @@ def build_quality_labels(detail):
     }
 
 
+
+def compact_factor_summary(factors):
+    factor_keys = [
+        ("liquidity_sweep", "Sweep"),
+        ("premium_zone", "Prem"),
+        ("local_high_update", "High"),
+        ("rejection_candle", "Rej"),
+    ]
+
+    parts = []
+
+    for key, label in factor_keys:
+        factor = find_factor(factors, key) or {}
+        status = factor.get("status")
+
+        if status == "confirmed":
+            icon = "✅"
+        elif status == "candidate":
+            icon = "⚠️"
+        elif status == "not_enough_data":
+            icon = "⚪"
+        else:
+            icon = "❌"
+
+        parts.append(f"{icon} {label}")
+
+    return " | ".join(parts)
+
+
+def compact_factor_detail(factors, key, default="N/A"):
+    factor = find_factor(factors, key) or {}
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if not detail:
+        return default
+
+    detail = detail.replace("Liquidity sweep", "Sweep")
+    detail = detail.replace("Rejection candle", "Rej")
+    detail = detail.replace("1H: ", "")
+    detail = detail.replace("1H closed: ", "closed: ")
+
+    return detail
+
 def format_multi_provider_telegram(
     grouped_signals,
     okx_total,
@@ -2347,20 +2445,27 @@ def format_multi_provider_telegram(
 
     lines = []
 
-    short_count = len(grouped_signals) if grouped_signals else 0
+    total_short_count = len(grouped_signals) if grouped_signals else 0
+    display_groups = (grouped_signals or [])[:TELEGRAM_MAX_SIGNALS]
+    displayed_count = len(display_groups)
 
     lines.append("📊 <b>Market Heat Scanner</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
-    lines.append(f"Short Watch Analysis: <b>{short_count}</b>")
+    lines.append(f"🧩 <code>{html.escape(SCRIPT_VERSION)}</code>")
+    lines.append(f"Short Watch Analysis: <b>{total_short_count}</b>")
+
+    if total_short_count > displayed_count:
+        lines.append(f"Showing top <b>{displayed_count}</b> of <b>{total_short_count}</b> signals")
+
     lines.append("")
     lines.append("━━━━━━━━━━━━")
     lines.append("<b>Short Watch Analysis</b>")
     lines.append("━━━━━━━━━━━━")
 
-    if not grouped_signals:
+    if not display_groups:
         lines.append("✅ No short-watch signals.")
     else:
-        for idx, group in enumerate(grouped_signals):
+        for idx, group in enumerate(display_groups):
             signal_label = telegram_signal_label(group["signal_level"])
             symbol = html.escape(str(group["symbol"]))
 
@@ -2377,35 +2482,25 @@ def format_multi_provider_telegram(
 
             short_factors = detail.get("short_factors", []) or []
             premium_info = format_premium_line_from_factors(short_factors)
-
-            confirmed_count = int(detail.get("confirmed_short_factors_count", 0))
-            total_count = int(detail.get("total_short_factors_count", len(short_factors)))
+            premium_1h = html.escape(premium_info["premium_1h"])
+            premium_4h = html.escape(premium_info["premium_4h"])
+            factor_summary = html.escape(compact_factor_summary(short_factors))
+            sweep_detail = html.escape(compact_factor_detail(short_factors, "liquidity_sweep", "N/A"))
 
             lines.append("")
-            lines.append(f"{idx + 1}) {signal_label}")
-            lines.append(f"📌 <code>{symbol}</code>")
-            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code>")
-            lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
-            lines.append(f"📊 RSI 1H L/C: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
-            lines.append(f"📊 RSI 4H L: <code>{rsi_4h_live}</code>")
+            lines.append(f"{idx + 1}) {signal_label} | <code>{symbol}</code>")
+            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code> | ΔVol <code>{vol_chg}%</code>")
+            lines.append(f"📊 RSI 1H <code>{rsi_1h_live}/{rsi_1h_closed}</code> | 4H <code>{rsi_4h_live}</code>")
+            lines.append(f"🗺 Prem: 1H <code>{premium_1h}</code> | 4H <code>{premium_4h}</code>")
+            lines.append(f"⚙️ {factor_summary}")
+            lines.append(f"🔎 Sweep: <code>{sweep_detail}</code>")
             lines.append(f"🧭 <i>{setup_status}</i>")
 
-            lines.append("")
-            lines.append("<b>Premium / Discount:</b>")
-            lines.append(f"1H: <code>{html.escape(premium_info['premium_1h'])}</code>")
-            lines.append(f"4H: <code>{html.escape(premium_info['premium_4h'])}</code>")
-
-            lines.append("")
-            lines.append(f"<b>Short Factors:</b> <code>{confirmed_count}/{total_count} implemented</code>")
-
-            for factor_line in format_short_factors_for_telegram(short_factors):
-                lines.append(html.escape(factor_line))
-
-            lines.append("Planned: ⚪ OI/Funding | ⚪ Volume climax | ⚪ Failed breakout | ⚪ MSS | ⚪ Divergence")
-
-            if idx != len(grouped_signals) - 1:
-                lines.append("")
+            if idx != len(display_groups) - 1:
                 lines.append("────────────")
+
+    lines.append("")
+    lines.append("Planned: ⚪ OI/Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS | ⚪ Div")
 
     return "\n".join(lines)
 
@@ -2417,6 +2512,7 @@ def format_multi_provider_telegram(
 def run_multi_provider_screener():
     print("\n" + "=" * 120)
     print("RUNNING MULTI-PROVIDER SCREENER")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
     print("=" * 120)
 
     okx_results, okx_total, okx_prefiltered, okx_active = run_okx_screener()
