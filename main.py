@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r1"
 
 RSI_PERIOD = 14
 
@@ -740,17 +740,42 @@ def detect_rejection_candle(
     wick_body_multiplier=REJECTION_UPPER_WICK_BODY_MULTIPLIER,
     volume_multiplier=REJECTION_VOLUME_MULTIPLIER,
 ):
-    if df_1h is None or df_1h.empty or len(df_1h) < volume_lookback + 1:
+    """
+    Detect a confirmed 1H rejection candle using only the last closed candle.
+
+    Important:
+    - Live candles are intentionally ignored for rejection confirmation.
+    - This prevents a still-forming impulse candle from being counted as a confirmed short trigger.
+    """
+
+    if df_1h is None or df_1h.empty:
         return make_factor(
             key="rejection_candle",
             label="Rejection candle",
             status="not_enough_data",
-            detail=f"requires {volume_lookback + 1} 1H candles",
+            detail="1H: no candles",
         )
 
     df = df_1h.copy().reset_index(drop=True)
-    current = df.iloc[-1]
-    previous = df.iloc[-(volume_lookback + 1):-1]
+    closed_candle, closed_index = get_last_closed_candle_for_analysis(df)
+
+    if closed_candle is None or closed_index is None:
+        return make_factor(
+            key="rejection_candle",
+            label="Rejection candle",
+            status="not_enough_data",
+            detail="1H closed: no closed candle",
+        )
+
+    if closed_index < volume_lookback:
+        return make_factor(
+            key="rejection_candle",
+            label="Rejection candle",
+            status="not_enough_data",
+            detail=f"requires {volume_lookback} closed 1H candles before trigger candle",
+        )
+
+    current = closed_candle
 
     open_price = float(current["open"])
     high_price = float(current["high"])
@@ -764,7 +789,7 @@ def detect_rejection_candle(
             key="rejection_candle",
             label="Rejection candle",
             status="not_enough_data",
-            detail="1H: invalid candle range",
+            detail="1H closed: invalid candle range",
         )
 
     body = abs(close_price - open_price)
@@ -773,15 +798,18 @@ def detect_rejection_candle(
     midpoint = low_price + candle_range * 0.5
 
     volume_series = get_volume_series(df)
-    current_volume = float(volume_series.iloc[-1]) if not pd.isna(volume_series.iloc[-1]) else np.nan
-    previous_avg_volume = float(volume_series.iloc[-(volume_lookback + 1):-1].mean())
+    current_volume_raw = volume_series.iloc[closed_index]
+    previous_volume_window = volume_series.iloc[closed_index - volume_lookback:closed_index]
+
+    current_volume = float(current_volume_raw) if not pd.isna(current_volume_raw) else np.nan
+    previous_avg_volume = float(previous_volume_window.mean())
 
     if pd.isna(current_volume) or pd.isna(previous_avg_volume) or previous_avg_volume <= 0:
         return make_factor(
             key="rejection_candle",
             label="Rejection candle",
             status="not_enough_data",
-            detail="1H: volume unavailable",
+            detail="1H closed: volume unavailable",
         )
 
     wick_ok = upper_wick >= body_reference * wick_body_multiplier
@@ -796,14 +824,14 @@ def detect_rejection_candle(
             label="Rejection candle",
             status="confirmed",
             points=2,
-            detail=f"1H: upper wick + weak close + volume {current_volume / previous_avg_volume:.1f}x",
+            detail=f"1H closed: upper wick + weak close + volume {current_volume / previous_avg_volume:.1f}x",
         )
 
     return make_factor(
         key="rejection_candle",
         label="Rejection candle",
         status="not_confirmed",
-        detail="1H: no wick/weak-close/volume confirmation",
+        detail="1H closed: no wick/weak-close/volume confirmation",
     )
 
 
@@ -2452,15 +2480,9 @@ def format_multi_provider_telegram(
     lines.append("📊 <b>Market Heat Scanner</b>")
     lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
     lines.append(f"🧩 <code>{html.escape(SCRIPT_VERSION)}</code>")
-    lines.append(f"Short Watch Analysis: <b>{total_short_count}</b>")
 
     if total_short_count > displayed_count:
-        lines.append(f"Showing top <b>{displayed_count}</b> of <b>{total_short_count}</b> signals")
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━")
-    lines.append("<b>Short Watch Analysis</b>")
-    lines.append("━━━━━━━━━━━━")
+        lines.append(f"Shown: <b>{displayed_count}</b>/<b>{total_short_count}</b>")
 
     if not display_groups:
         lines.append("✅ No short-watch signals.")
