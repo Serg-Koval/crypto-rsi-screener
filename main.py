@@ -40,7 +40,10 @@ MIN_PRICE_CHANGE_24H = EARLY_PUMP_PRICE_CHANGE_24H
 MIN_VOLUME_USD_24H = 5_000_000
 
 # Short-analysis settings based on 1H OHLCV only.
-LIQUIDITY_SWEEP_LOOKBACK = 30
+LIQUIDITY_SWEEP_LOOKBACKS = {
+    "24H": 24,
+    "12H": 12,
+}
 PREMIUM_ZONE_LOOKBACK = 72
 PREMIUM_ZONE_LOOKBACK_1H = 72
 PREMIUM_ZONE_LOOKBACK_4H = 42
@@ -271,39 +274,179 @@ def get_volume_series(df):
     return pd.Series([np.nan] * len(df), index=df.index)
 
 
-def detect_liquidity_sweep(df_1h, lookback=LIQUIDITY_SWEEP_LOOKBACK):
-    if df_1h is None or df_1h.empty or len(df_1h) < lookback + 1:
+def get_last_closed_candle_for_analysis(df):
+    """
+    Return the last closed candle for factor analysis.
+
+    OKX has explicit confirm flag:
+    - confirm = 0 means live candle;
+    - confirm = 1 means closed candle.
+
+    Other providers may not expose confirm in the normalized dataframe.
+    In that case, the safest generic assumption is:
+    - last row = live/current candle;
+    - previous row = last closed candle.
+    """
+
+    if df is None or df.empty:
+        return None, None
+
+    work_df = df.copy().reset_index(drop=True)
+
+    if "confirm" in work_df.columns:
+        closed_df = work_df[work_df["confirm"] == 1].copy()
+
+        if closed_df.empty:
+            return None, None
+
+        closed_index = int(closed_df.index[-1])
+        return work_df.iloc[closed_index], closed_index
+
+    if len(work_df) < 2:
+        return None, None
+
+    closed_index = len(work_df) - 2
+    return work_df.iloc[closed_index], closed_index
+
+
+def get_live_candle_for_analysis(df):
+    if df is None or df.empty:
+        return None, None
+
+    work_df = df.copy().reset_index(drop=True)
+    live_index = len(work_df) - 1
+
+    return work_df.iloc[live_index], live_index
+
+
+def previous_high_before_index(df, candle_index, lookback):
+    if df is None or df.empty:
+        return None
+
+    if candle_index is None:
+        return None
+
+    if candle_index < lookback:
+        return None
+
+    previous = df.iloc[candle_index - lookback:candle_index]
+
+    if previous.empty:
+        return None
+
+    return float(previous["high"].max())
+
+
+def evaluate_sweep_against_previous_high(candle, previous_high):
+    if candle is None or previous_high is None:
+        return False
+
+    current_high = float(candle["high"])
+    current_close = float(candle["close"])
+
+    return current_high > previous_high and current_close < previous_high
+
+
+def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
+    """
+    Liquidity sweep model on 1H candles.
+
+    Confirmed sweep:
+    - last closed 1H candle swept previous 12H/24H high;
+    - last closed 1H candle closed back below that high.
+
+    Live sweep candidate:
+    - current live 1H candle swept previous 12H/24H high;
+    - current live 1H candle is currently back below that high;
+    - candle is not closed yet, so the signal can still turn into a breakout.
+
+    Priority:
+    - confirmed 24H sweep > confirmed 12H sweep;
+    - live 24H candidate > live 12H candidate.
+    """
+
+    if df_1h is None or df_1h.empty:
         return make_factor(
             key="liquidity_sweep",
             label="Liquidity sweep",
             status="not_enough_data",
-            detail=f"requires {lookback + 1} 1H candles",
+            detail="1H: no candles",
         )
 
     df = df_1h.copy().reset_index(drop=True)
-    current = df.iloc[-1]
-    previous = df.iloc[-(lookback + 1):-1]
 
-    previous_high = float(previous["high"].max())
-    current_high = float(current["high"])
-    current_close = float(current["close"])
+    max_lookback = max(lookbacks.values())
 
-    confirmed = current_high > previous_high and current_close < previous_high
-
-    if confirmed:
+    if len(df) < max_lookback + 1:
         return make_factor(
             key="liquidity_sweep",
             label="Liquidity sweep",
-            status="confirmed",
-            points=2,
-            detail=f"1H: swept {lookback}H high",
+            status="not_enough_data",
+            detail=f"1H: requires {max_lookback + 1} candles",
+        )
+
+    closed_candle, closed_index = get_last_closed_candle_for_analysis(df)
+    live_candle, live_index = get_live_candle_for_analysis(df)
+
+    # Stronger tier first.
+    tiers = [
+        ("24H", lookbacks["24H"], 2),
+        ("12H", lookbacks["12H"], 1),
+    ]
+
+    checked_any = False
+
+    # Confirmed closed-candle sweep.
+    for label, lookback, points in tiers:
+        previous_high = previous_high_before_index(df, closed_index, lookback)
+
+        if previous_high is None:
+            continue
+
+        checked_any = True
+
+        if evaluate_sweep_against_previous_high(closed_candle, previous_high):
+            return make_factor(
+                key="liquidity_sweep",
+                label="Liquidity sweep",
+                status="confirmed",
+                points=points,
+                detail=f"1H closed: swept {label} high and closed back below",
+            )
+
+    # Live sweep candidate. Do not mark it as confirmed.
+    # If live_index == closed_index, then the latest candle is already closed, so no live candidate exists.
+    if live_index is not None and closed_index is not None and live_index != closed_index:
+        for label, lookback, points in tiers:
+            previous_high = previous_high_before_index(df, live_index, lookback)
+
+            if previous_high is None:
+                continue
+
+            checked_any = True
+
+            if evaluate_sweep_against_previous_high(live_candle, previous_high):
+                return make_factor(
+                    key="liquidity_sweep",
+                    label="Liquidity sweep",
+                    status="candidate",
+                    points=0,
+                    detail=f"1H live: swept {label} high, candle not closed",
+                )
+
+    if checked_any:
+        return make_factor(
+            key="liquidity_sweep",
+            label="Liquidity sweep",
+            status="not_confirmed",
+            detail="1H: no 12H/24H sweep",
         )
 
     return make_factor(
         key="liquidity_sweep",
         label="Liquidity sweep",
-        status="not_confirmed",
-        detail=f"1H: {lookback}H high not swept/reclaimed",
+        status="not_enough_data",
+        detail="1H: insufficient 12H/24H history",
     )
 
 
@@ -312,6 +455,9 @@ def classify_premium_position(position):
         return "N/A"
 
     position = float(position)
+
+    if position > 1.0:
+        return "Above Range High"
 
     if position >= 0.786:
         return "Extreme Premium"
@@ -394,7 +540,7 @@ def detect_premium_zone(
             else:
                 labels.append(f"{tf}: {label}")
 
-            if label == "Extreme Premium":
+            if label in ("Above Range High", "Extreme Premium"):
                 points += 2
                 confirmed = True
             elif label == "Premium":
@@ -666,16 +812,22 @@ def calculate_location_trigger_context(short_factors):
     premium = get_short_factor(short_factors, "premium_zone") or {}
     local_high = get_short_factor(short_factors, "local_high_update") or {}
 
+    liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
+    liquidity_candidate = liquidity.get("status") == "candidate"
     rejection_confirmed = is_factor_confirmed(short_factors, "rejection_candle")
 
     location_score = int(premium.get("points", 0)) + int(local_high.get("points", 0))
     trigger_count = int(liquidity_confirmed) + int(rejection_confirmed)
+    early_trigger_count = int(liquidity_candidate)
 
     trigger_parts = []
 
     if liquidity_confirmed:
         trigger_parts.append("liquidity sweep")
+
+    if liquidity_candidate:
+        trigger_parts.append("live liquidity sweep candidate")
 
     if rejection_confirmed:
         trigger_parts.append("rejection candle")
@@ -683,7 +835,9 @@ def calculate_location_trigger_context(short_factors):
     return {
         "location_score": location_score,
         "trigger_count": trigger_count,
+        "early_trigger_count": early_trigger_count,
         "liquidity_confirmed": liquidity_confirmed,
+        "liquidity_candidate": liquidity_candidate,
         "rejection_confirmed": rejection_confirmed,
         "trigger_parts": trigger_parts,
     }
@@ -715,6 +869,9 @@ def quality_trigger_label_from_context(context):
     if rejection_confirmed:
         return "Partial — 1H rejection only"
 
+    if bool(context.get("liquidity_candidate")):
+        return "Early — 1H live liquidity sweep candidate"
+
     return "None"
 
 
@@ -744,7 +901,10 @@ def build_setup_status(signal_level, scores, short_factors):
             missing.append("RSI heat")
 
         if trigger_count == 0:
-            missing.append("1H short trigger")
+            if bool(context.get("liquidity_candidate")):
+                missing.append("confirmed 1H trigger")
+            else:
+                missing.append("1H short trigger")
         elif not rejection_confirmed:
             missing.append("1H rejection")
 
@@ -1915,6 +2075,8 @@ def short_factor_line(factor):
 
     if status == "confirmed":
         icon = "✅"
+    elif status == "candidate":
+        icon = "⚠️"
     elif status == "not_enough_data":
         icon = "⚪"
     else:
