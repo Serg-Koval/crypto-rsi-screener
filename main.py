@@ -2307,23 +2307,12 @@ def format_multi_provider_telegram(
             lines.append(f"4H: <code>{html.escape(premium_info['premium_4h'])}</code>")
 
             lines.append("")
-            lines.append("<b>Quality:</b>")
-            lines.append(f"Pump: <code>{html.escape(quality['pump_quality'])}</code> | Heat: <code>{html.escape(quality['heat_quality'])}</code> | Vol: <code>{html.escape(quality['volume_quality'])}</code>")
-            lines.append(f"Location: <code>{html.escape(quality['location_quality'])}</code> | Trigger: <code>{html.escape(quality['trigger_quality'])}</code>")
-            lines.append(f"Priority: <code>{html.escape(quality['priority_quality'])}</code>")
-
-            lines.append("")
-            lines.append(f"<b>Factors:</b> <code>{confirmed_count}/{total_count}</code>")
+            lines.append(f"<b>Short Factors:</b> <code>{confirmed_count}/{total_count} implemented</code>")
 
             for factor_line in format_short_factors_for_telegram(short_factors):
                 lines.append(html.escape(factor_line))
 
-            setup_status = html.escape(str(quality.get("setup_status", "N/A")))
-            reason = html.escape(str(group.get("reason", detail.get("reason", "N/A"))))
-
-            lines.append("")
-            lines.append(f"Setup: <code>{setup_status}</code>")
-            lines.append(f"Reason: <i>{reason}</i>")
+            lines.append("Planned: ⚪ Divergence | ⚪ Volume climax | ⚪ Failed breakout | ⚪ MSS")
 
             if idx != len(grouped_signals) - 1:
                 lines.append("")
