@@ -296,14 +296,14 @@ def detect_liquidity_sweep(df_1h, lookback=LIQUIDITY_SWEEP_LOOKBACK):
             label="Liquidity sweep",
             status="confirmed",
             points=2,
-            detail=f"swept {lookback}H high",
+            detail=f"1H: swept {lookback}H high",
         )
 
     return make_factor(
         key="liquidity_sweep",
         label="Liquidity sweep",
         status="not_confirmed",
-        detail=f"{lookback}H high not swept/reclaimed",
+        detail=f"1H: {lookback}H high not swept/reclaimed",
     )
 
 
@@ -460,7 +460,7 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
                 label="Local high update",
                 status="confirmed",
                 points=points,
-                detail=f"new {label} high",
+                detail=f"1H: new {label} high",
             )
 
     if checked_any:
@@ -468,7 +468,7 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
             key="local_high_update",
             label="Local high update",
             status="not_confirmed",
-            detail="no 24H/48H/7D high update",
+            detail="1H: no 24H/48H/7D high update",
         )
 
     return make_factor(
@@ -509,7 +509,7 @@ def detect_rejection_candle(
             key="rejection_candle",
             label="Rejection candle",
             status="not_enough_data",
-            detail="invalid candle range",
+            detail="1H: invalid candle range",
         )
 
     body = abs(close_price - open_price)
@@ -526,7 +526,7 @@ def detect_rejection_candle(
             key="rejection_candle",
             label="Rejection candle",
             status="not_enough_data",
-            detail="volume unavailable",
+            detail="1H: volume unavailable",
         )
 
     wick_ok = upper_wick >= body_reference * wick_body_multiplier
@@ -541,14 +541,14 @@ def detect_rejection_candle(
             label="Rejection candle",
             status="confirmed",
             points=2,
-            detail=f"upper wick + weak close + volume {current_volume / previous_avg_volume:.1f}x",
+            detail=f"1H: upper wick + weak close + volume {current_volume / previous_avg_volume:.1f}x",
         )
 
     return make_factor(
         key="rejection_candle",
         label="Rejection candle",
         status="not_confirmed",
-        detail="no wick/weak-close/volume confirmation",
+        detail="1H: no wick/weak-close/volume confirmation",
     )
 
 
@@ -707,13 +707,13 @@ def quality_trigger_label_from_context(context):
     rejection_confirmed = bool(context.get("rejection_confirmed"))
 
     if trigger_count >= 2:
-        return "Confirmed — liquidity sweep + rejection"
+        return "Confirmed — 1H liquidity sweep + 1H rejection"
 
     if liquidity_confirmed:
-        return "Partial — liquidity sweep only"
+        return "Partial — 1H liquidity sweep only"
 
     if rejection_confirmed:
-        return "Partial — rejection only"
+        return "Partial — 1H rejection only"
 
     return "None"
 
@@ -725,26 +725,28 @@ def build_setup_status(signal_level, scores, short_factors):
     rejection_confirmed = bool(context.get("rejection_confirmed"))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        return "High priority watch — heat, location, and trigger confirmation are aligned"
+        return "High priority watch — heat, location, and 1H trigger confirmation are aligned"
 
     if signal_level == "SHORT_WATCH":
+        if trigger_count >= 2:
+            return "Short watch — 1H liquidity sweep + 1H rejection detected"
         if rejection_confirmed:
-            return "Short watch — rejection confirmation detected"
-        return "Short watch — partial trigger detected, rejection still missing"
+            return "Short watch — 1H rejection detected, liquidity sweep not confirmed"
+        return "Short watch — 1H liquidity sweep detected, rejection still missing"
 
     if signal_level == "OVERHEAT_WATCH":
-        return "Heat watch — RSI heat is present, but short trigger is not confirmed"
+        return "Heat watch — RSI heat is present, but 1H short trigger is not confirmed"
 
     if signal_level == "PUMP_WATCH":
         missing = []
 
-        if rsi_score < 2:
-            missing.append("moderate RSI heat")
+        if rsi_score < 1:
+            missing.append("RSI heat")
 
         if trigger_count == 0:
-            missing.append("short trigger")
+            missing.append("1H short trigger")
         elif not rejection_confirmed:
-            missing.append("rejection candle confirmation")
+            missing.append("1H rejection")
 
         if missing:
             return "Watch only — missing " + " / ".join(missing)
@@ -763,19 +765,19 @@ def build_watch_reason(signal_level, scores, short_factors):
     setup_status = build_setup_status(signal_level, scores, short_factors)
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed trigger"
+        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed 1H trigger"
 
     if signal_level == "SHORT_WATCH":
-        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + {trigger_quality}"
+        return f"{pump_quality} pump + {location_quality} location + {trigger_quality}. RSI heat: {heat_quality}"
 
     if signal_level == "OVERHEAT_WATCH":
-        return f"{pump_quality} pump + {heat_quality} RSI heat, but trigger confirmation is missing"
+        return f"{pump_quality} pump + {heat_quality} RSI heat, but 1H trigger confirmation is missing"
 
     if signal_level == "PUMP_WATCH":
         base_parts = [f"{pump_quality} pump"]
 
         if location_quality != "None":
-            base_parts.append(f"{location_quality} location context")
+            base_parts.append(f"{location_quality} location")
 
         if trigger_quality != "None":
             base_parts.append(trigger_quality)
@@ -786,6 +788,14 @@ def build_watch_reason(signal_level, scores, short_factors):
 
 
 def classify_watch_signal(scores, short_factors=None):
+    """
+    Block 1 model.
+
+    Key rule:
+    pump + premium/location alone is not enough.
+    A Block 1 candidate needs either RSI heat or a 1H trigger.
+    """
+
     short_factors = short_factors or []
 
     pump_score = int(scores.get("pump_score", 0))
@@ -795,13 +805,22 @@ def classify_watch_signal(scores, short_factors=None):
     location_score = int(context.get("location_score", 0))
     trigger_count = int(context.get("trigger_count", 0))
 
-    if pump_score >= 2 and rsi_score >= 3 and location_score >= 3 and trigger_count >= 2:
+    has_pump = pump_score >= 2
+    has_location = location_score >= 2
+    has_heat = rsi_score >= 1
+    has_moderate_heat = rsi_score >= 2
+    has_trigger = trigger_count >= 1
+    has_confirmed_trigger = trigger_count >= 2
+
+    if has_pump and has_location and has_confirmed_trigger and has_moderate_heat:
         signal_level = "HIGH_PRIORITY_SHORT_WATCH"
-    elif pump_score >= 2 and rsi_score >= 2 and location_score >= 2 and trigger_count >= 1:
+    elif has_pump and has_location and has_confirmed_trigger and has_heat:
         signal_level = "SHORT_WATCH"
-    elif pump_score >= 1 and rsi_score >= 2:
+    elif has_pump and has_location and has_trigger and has_moderate_heat:
+        signal_level = "SHORT_WATCH"
+    elif has_pump and has_location and has_moderate_heat:
         signal_level = "OVERHEAT_WATCH"
-    elif pump_score >= 1 and (rsi_score >= 1 or location_score >= 2):
+    elif has_pump and has_location and (has_heat or has_trigger):
         signal_level = "PUMP_WATCH"
     else:
         signal_level = "NO_SIGNAL"
@@ -2229,29 +2248,26 @@ def format_multi_provider_telegram(
     bitget_active,
 ):
     """
-    Test-mode Telegram report with two blocks:
-    1. short-score analysis;
-    2. heat indicators only calibration.
+    Compact test-mode Telegram report.
+    Block 1: short-score analysis.
+    Block 2: RSI heat monitor, displayed only when not empty.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
 
     lines = []
 
-    lines.append("📊 <b>Market Heat Scanner</b>")
-    lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
-    lines.append("")
-
     short_count = len(grouped_signals) if grouped_signals else 0
     heat_count = len(grouped_rsi_only_signals) if grouped_rsi_only_signals else 0
 
+    lines.append("📊 <b>Market Heat Scanner</b>")
+    lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
     lines.append(f"Block 1 — Short score analysis: <b>{short_count}</b>")
     lines.append(f"Block 2 — RSI heat monitor: <b>{heat_count}</b>")
     lines.append("")
     lines.append("━━━━━━━━━━━━")
     lines.append("<b>Block 1 — Short score analysis</b>")
     lines.append("━━━━━━━━━━━━")
-    lines.append("")
 
     if not grouped_signals:
         lines.append("✅ No short-score watch signals.")
@@ -2277,15 +2293,13 @@ def format_multi_provider_telegram(
             confirmed_count = int(detail.get("confirmed_short_factors_count", 0))
             total_count = int(detail.get("total_short_factors_count", len(short_factors)))
 
+            lines.append("")
             lines.append(f"{idx + 1}) {signal_label}")
             lines.append(f"📌 <code>{symbol}</code>")
-            lines.append("")
-            lines.append(f"💵 Price: <code>{price}</code>")
-            lines.append(f"📊 RSI 1H live/closed: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
-            lines.append(f"📊 RSI 4H live: <code>{rsi_4h_live}</code>")
-            lines.append(f"📈 24h: <code>{chg_24h}%</code>")
-            lines.append(f"💰 Vol: <code>{vol_24h}</code>")
+            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code>")
             lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
+            lines.append(f"📊 RSI 1H L/C: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
+            lines.append(f"📊 RSI 4H L: <code>{rsi_4h_live}</code>")
 
             lines.append("")
             lines.append("<b>Premium / Discount:</b>")
@@ -2293,45 +2307,35 @@ def format_multi_provider_telegram(
             lines.append(f"4H: <code>{html.escape(premium_info['premium_4h'])}</code>")
 
             lines.append("")
-            lines.append("<b>Signal quality:</b>")
-            lines.append(f"Pump: <code>{html.escape(quality['pump_quality'])}</code>")
-            lines.append(f"RSI heat: <code>{html.escape(quality['heat_quality'])}</code>")
-            lines.append(f"Volume: <code>{html.escape(quality['volume_quality'])}</code>")
-            lines.append(f"Location: <code>{html.escape(quality['location_quality'])}</code>")
-            lines.append(f"Trigger: <code>{html.escape(quality['trigger_quality'])}</code>")
+            lines.append("<b>Quality:</b>")
+            lines.append(f"Pump: <code>{html.escape(quality['pump_quality'])}</code> | Heat: <code>{html.escape(quality['heat_quality'])}</code> | Vol: <code>{html.escape(quality['volume_quality'])}</code>")
+            lines.append(f"Location: <code>{html.escape(quality['location_quality'])}</code> | Trigger: <code>{html.escape(quality['trigger_quality'])}</code>")
             lines.append(f"Priority: <code>{html.escape(quality['priority_quality'])}</code>")
 
             lines.append("")
-            lines.append(f"<b>Short factors:</b> <code>{confirmed_count}/{total_count}</code>")
+            lines.append(f"<b>Factors:</b> <code>{confirmed_count}/{total_count}</code>")
 
             for factor_line in format_short_factors_for_telegram(short_factors):
                 lines.append(html.escape(factor_line))
 
-            lines.append("")
-
             setup_status = html.escape(str(quality.get("setup_status", "N/A")))
-            lines.append("<b>Setup status:</b>")
-            lines.append(f"<code>{setup_status}</code>")
-            lines.append("")
             reason = html.escape(str(group.get("reason", detail.get("reason", "N/A"))))
+
+            lines.append("")
+            lines.append(f"Setup: <code>{setup_status}</code>")
             lines.append(f"Reason: <i>{reason}</i>")
 
             if idx != len(grouped_signals) - 1:
                 lines.append("")
                 lines.append("────────────")
-                lines.append("")
 
-    lines.append("")
-    lines.append("━━━━━━━━━━━━")
-    lines.append("<b>Block 2 — RSI heat monitor</b>")
-    lines.append("━━━━━━━━━━━━")
-    lines.append("")
-    lines.append("This block shows RSI heat candidates only and ignores short-factor confirmation.")
-    lines.append("")
+    if grouped_rsi_only_signals:
+        lines.append("")
+        lines.append("━━━━━━━━━━━━")
+        lines.append("<b>Block 2 — RSI heat monitor</b>")
+        lines.append("━━━━━━━━━━━━")
+        lines.append("This block shows RSI heat candidates only.")
 
-    if not grouped_rsi_only_signals:
-        lines.append("✅ No RSI heat candidates.")
-    else:
         for idx, group in enumerate(grouped_rsi_only_signals):
             signal_label = rsi_only_signal_label(group["rsi_only_level"])
             symbol = html.escape(str(group["symbol"]))
@@ -2342,31 +2346,20 @@ def format_multi_provider_telegram(
             chg_24h = html.escape(str(group.get("chg_24h_%", "N/A")))
             vol_24h = html.escape(str(group.get("vol_24h", "N/A")))
             vol_chg = html.escape(str(group.get("vol_chg_24h_%", "N/A")))
-            confirmed_count = int(group.get("confirmed_short_factors_count", 0))
-            total_count = int(group.get("total_short_factors_count", 0))
-            main_signal_level = html.escape(str(group.get("main_signal_level", "NO_SIGNAL")))
             reason = html.escape(str(group.get("rsi_only_reason", "N/A")))
 
-            quality = {
-                "pump_quality": quality_pump_label(group.get("pump_score", 0)),
-                "heat_quality": quality_heat_label(group.get("rsi_score", 0)),
-                "volume_quality": quality_volume_label(group.get("volume_score", 0)),
-            }
-
+            lines.append("")
             lines.append(f"{idx + 1}) {signal_label}")
             lines.append(f"📌 <code>{symbol}</code>")
-            lines.append(f"💵 Price: <code>{price}</code>")
-            lines.append(f"📊 RSI 1H live/closed: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
-            lines.append(f"📊 RSI 4H live: <code>{rsi_4h_live}</code>")
-            lines.append(f"📈 24h: <code>{chg_24h}%</code> | Vol: <code>{vol_24h}</code>")
+            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code>")
             lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
-            lines.append(f"Heat: <code>{html.escape(quality['heat_quality'])}</code> | Pump: <code>{html.escape(quality['pump_quality'])}</code> | Volume: <code>{html.escape(quality['volume_quality'])}</code>")
+            lines.append(f"📊 RSI 1H L/C: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
+            lines.append(f"📊 RSI 4H L: <code>{rsi_4h_live}</code>")
             lines.append(f"Reason: <i>{reason}</i>")
 
             if idx != len(grouped_rsi_only_signals) - 1:
                 lines.append("")
                 lines.append("────────────")
-                lines.append("")
 
     return "\n".join(lines)
 
