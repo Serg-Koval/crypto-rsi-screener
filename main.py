@@ -67,7 +67,7 @@ def create_session():
     session.mount("http://", adapter)
 
     session.headers.update({
-        "User-Agent": "multi-exchange-rsi-screener-test/1.0"
+        "User-Agent": "multi-exchange-rsi-screener/1.1"
     })
 
     return session
@@ -211,7 +211,16 @@ def parse_float_from_value(value):
         return None
 
 
-def classify_signal(rsi_1h, rsi_4h, exact_volume_24h, price_change_24h):
+def classify_signal(rsi_1h_live, rsi_1h_closed, rsi_4h_live, exact_volume_24h, price_change_24h):
+    """
+    New RSI model:
+    - 1H live RSI: fast momentum trigger.
+    - 1H closed RSI: confirmation / quality filter.
+    - 4H live RSI: higher-timeframe live overheat context.
+
+    Closed 4H RSI is intentionally not used in signal classification.
+    """
+
     volume_ok = (
         exact_volume_24h is not None and
         exact_volume_24h >= MIN_VOLUME_USD_24H
@@ -225,40 +234,48 @@ def classify_signal(rsi_1h, rsi_4h, exact_volume_24h, price_change_24h):
             "reason": "Filters not passed"
         }
 
-    rsi_4h_condition = rsi_4h > RSI_4H_ALERT
-    rsi_4h_extreme_condition = rsi_4h > RSI_4H_EXTREME
-    rsi_1h_condition = rsi_1h > RSI_1H_ALERT
-    combined_condition = rsi_4h_condition and rsi_1h_condition
+    rsi_4h_live_condition = rsi_4h_live > RSI_4H_ALERT
+    rsi_4h_live_extreme_condition = rsi_4h_live > RSI_4H_EXTREME
+    rsi_1h_live_condition = rsi_1h_live > RSI_1H_ALERT
+    rsi_1h_closed_confirmation = rsi_1h_closed >= 80
+
+    combined_condition = rsi_4h_live_condition and (
+        rsi_1h_live_condition or rsi_1h_closed_confirmation
+    )
 
     if combined_condition:
+        if rsi_1h_live_condition:
+            one_hour_reason = f"RSI 1H live > {RSI_1H_ALERT}"
+        else:
+            one_hour_reason = "RSI 1H closed >= 80"
+
         return {
             "signal_level": "COMBINED_OVERHEAT",
-            "reason": f"RSI 1H > {RSI_1H_ALERT} and RSI 4H > {RSI_4H_ALERT}"
+            "reason": f"{one_hour_reason} and RSI 4H live > {RSI_4H_ALERT}"
         }
 
-    if rsi_4h_extreme_condition:
+    if rsi_4h_live_extreme_condition:
         return {
             "signal_level": "EXTREME_4H",
-            "reason": f"RSI 4H > {RSI_4H_EXTREME}"
+            "reason": f"RSI 4H live > {RSI_4H_EXTREME}"
         }
 
-    if rsi_4h_condition:
+    if rsi_4h_live_condition:
         return {
             "signal_level": "STRONG_4H",
-            "reason": f"RSI 4H > {RSI_4H_ALERT}"
+            "reason": f"RSI 4H live > {RSI_4H_ALERT}"
         }
 
-    if rsi_1h_condition:
+    if rsi_1h_live_condition:
         return {
             "signal_level": "EXTREME_1H",
-            "reason": f"RSI 1H > {RSI_1H_ALERT}"
+            "reason": f"RSI 1H live > {RSI_1H_ALERT}"
         }
 
     return {
         "signal_level": "NO_SIGNAL",
         "reason": "RSI filters not passed"
     }
-
 
 def get_signal_rank(signal_level):
     ranks = {
@@ -405,6 +422,16 @@ def okx_get_last_closed_candle(df):
 
     return closed_df.iloc[-1]
 
+def okx_get_last_live_candle(df):
+    """
+    OKX returns the current candle with confirm = 0 when it is still open.
+    For live RSI we intentionally use the latest candle regardless of confirm.
+    """
+
+    if df is None or df.empty:
+        raise Exception("OKX: empty candles dataframe.")
+
+    return df.iloc[-1]
 
 def okx_closed_24h_quote_volume(df_1h):
     closed_df = df_1h[df_1h["confirm"] == 1].copy()
@@ -497,20 +524,23 @@ def okx_analyze_candidate(inst_id, ticker_row):
     df_4h = okx_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
-    last_1h = okx_get_last_closed_candle(df_1h)
-    last_4h = okx_get_last_closed_candle(df_4h)
+    last_1h_live = okx_get_last_live_candle(df_1h)
+    last_1h_closed = okx_get_last_closed_candle(df_1h)
+    last_4h_live = okx_get_last_live_candle(df_4h)
 
     exact_volume_24h = okx_closed_24h_quote_volume(df_1h)
     volume_change_24h = okx_volume_change_24h(df_1h)
 
-    rsi_1h = float(last_1h["rsi"])
-    rsi_4h = float(last_4h["rsi"])
-    price = float(last_1h["close"])
+    rsi_1h_live = float(last_1h_live["rsi"])
+    rsi_1h_closed = float(last_1h_closed["rsi"])
+    rsi_4h_live = float(last_4h_live["rsi"])
+    price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
     classification = classify_signal(
-        rsi_1h=rsi_1h,
-        rsi_4h=rsi_4h,
+        rsi_1h_live=rsi_1h_live,
+        rsi_1h_closed=rsi_1h_closed,
+        rsi_4h_live=rsi_4h_live,
         exact_volume_24h=exact_volume_24h,
         price_change_24h=price_change_24h,
     )
@@ -521,15 +551,15 @@ def okx_analyze_candidate(inst_id, ticker_row):
         "raw_symbol": inst_id,
         "symbol": okx_make_report_symbol(inst_id),
         "price": price,
-        "rsi_1h": rsi_1h,
-        "rsi_4h": rsi_4h,
+        "rsi_1h_live": rsi_1h_live,
+        "rsi_1h_closed": rsi_1h_closed,
+        "rsi_4h_live": rsi_4h_live,
         "volume_usd_24h_exact": exact_volume_24h,
         "volume_change_24h_percent": volume_change_24h,
         "price_change_24h_percent": price_change_24h,
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
     }
-
 
 def run_okx_screener():
     print("\n" + "=" * 120)
@@ -750,6 +780,16 @@ def bitget_get_last_closed_candle(df):
 
     return df.iloc[-1]
 
+def bitget_get_last_live_candle(df):
+    """
+    Bitget does not provide a confirm field.
+    For live RSI we use the latest candle row.
+    """
+
+    if df is None or df.empty:
+        raise Exception("Bitget: empty candles dataframe.")
+
+    return df.iloc[-1]
 
 def bitget_closed_24h_quote_volume(df_1h):
     if df_1h is None or df_1h.empty or "quote_volume" not in df_1h.columns:
@@ -831,20 +871,23 @@ def bitget_analyze_candidate(symbol, ticker_row):
     df_4h = bitget_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
-    last_1h = bitget_get_last_closed_candle(df_1h)
-    last_4h = bitget_get_last_closed_candle(df_4h)
+    last_1h_live = bitget_get_last_live_candle(df_1h)
+    last_1h_closed = bitget_get_last_closed_candle(df_1h)
+    last_4h_live = bitget_get_last_live_candle(df_4h)
 
     exact_volume_24h = bitget_closed_24h_quote_volume(df_1h)
     volume_change_24h = bitget_volume_change_24h(df_1h)
 
-    rsi_1h = float(last_1h["rsi"])
-    rsi_4h = float(last_4h["rsi"])
-    price = float(last_1h["close"])
+    rsi_1h_live = float(last_1h_live["rsi"])
+    rsi_1h_closed = float(last_1h_closed["rsi"])
+    rsi_4h_live = float(last_4h_live["rsi"])
+    price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
     classification = classify_signal(
-        rsi_1h=rsi_1h,
-        rsi_4h=rsi_4h,
+        rsi_1h_live=rsi_1h_live,
+        rsi_1h_closed=rsi_1h_closed,
+        rsi_4h_live=rsi_4h_live,
         exact_volume_24h=exact_volume_24h,
         price_change_24h=price_change_24h,
     )
@@ -855,15 +898,15 @@ def bitget_analyze_candidate(symbol, ticker_row):
         "raw_symbol": symbol,
         "symbol": f"{symbol}.P",
         "price": price,
-        "rsi_1h": rsi_1h,
-        "rsi_4h": rsi_4h,
+        "rsi_1h_live": rsi_1h_live,
+        "rsi_1h_closed": rsi_1h_closed,
+        "rsi_4h_live": rsi_4h_live,
         "volume_usd_24h_exact": exact_volume_24h,
         "volume_change_24h_percent": volume_change_24h,
         "price_change_24h_percent": price_change_24h,
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
     }
-
 
 def run_bitget_screener():
     print("\n" + "=" * 120)
@@ -1010,8 +1053,9 @@ def prepare_active_output_table(df_active):
     df_out = df_active.copy()
 
     df_out["price"] = df_out["price"].apply(format_price_2)
-    df_out["rsi_1h"] = df_out["rsi_1h"].round(2)
-    df_out["rsi_4h"] = df_out["rsi_4h"].round(2)
+    df_out["rsi_1h_live"] = df_out["rsi_1h_live"].round(2)
+    df_out["rsi_1h_closed"] = df_out["rsi_1h_closed"].round(2)
+    df_out["rsi_4h_live"] = df_out["rsi_4h_live"].round(2)
     df_out["chg_24h_%"] = df_out["price_change_24h_percent"].apply(format_percent_2)
     df_out["vol_24h"] = df_out["volume_usd_24h_exact"].apply(format_large_number)
     df_out["vol_chg_24h_%"] = df_out["volume_change_24h_percent"].apply(format_percent_2)
@@ -1021,8 +1065,9 @@ def prepare_active_output_table(df_active):
         "signal_level",
         "symbol",
         "price",
-        "rsi_1h",
-        "rsi_4h",
+        "rsi_1h_live",
+        "rsi_1h_closed",
+        "rsi_4h_live",
         "chg_24h_%",
         "vol_24h",
         "vol_chg_24h_%",
@@ -1030,7 +1075,6 @@ def prepare_active_output_table(df_active):
     ]
 
     return df_out[columns]
-
 
 def exchange_sort_key(exchange):
     order = {
@@ -1043,12 +1087,11 @@ def exchange_sort_key(exchange):
 
 def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
     """
-    Групує активні сигнали по symbol.
+    Group active signals by symbol.
 
-    Навіщо:
-    - якщо BEATUSDT.P є і на OKX, і на Bitget, Telegram покаже його один раз;
-    - всередині одного блоку буде видно всі біржі;
-    - ранжування береться за найсильнішим сигналом серед бірж.
+    If the same symbol exists on OKX and Bitget, Telegram shows it once.
+    Display values are taken from OKX when available; otherwise from the first available exchange.
+    Ranking uses live RSI fields, not closed 4H RSI.
     """
 
     if df_active is None or df_active.empty:
@@ -1065,12 +1108,13 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
         group_sorted = group.sort_values(
             by=[
                 "signal_rank",
-                "rsi_4h",
-                "rsi_1h",
+                "rsi_4h_live",
+                "rsi_1h_live",
+                "rsi_1h_closed",
                 "price_change_24h_percent",
                 "sort_volume",
             ],
-            ascending=[False, False, False, False, False],
+            ascending=[False, False, False, False, False, False],
         ).reset_index(drop=True)
 
         top_row = group_sorted.iloc[0]
@@ -1095,8 +1139,9 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
                 "signal_level": str(row["signal_level"]),
                 "reason": str(row["reason"]),
                 "price": format_price_2(row["price"]),
-                "rsi_1h": f"{float(row['rsi_1h']):.2f}",
-                "rsi_4h": f"{float(row['rsi_4h']):.2f}",
+                "rsi_1h_live": f"{float(row['rsi_1h_live']):.2f}",
+                "rsi_1h_closed": f"{float(row['rsi_1h_closed']):.2f}",
+                "rsi_4h_live": f"{float(row['rsi_4h_live']):.2f}",
                 "chg_24h_%": format_percent_2(row["price_change_24h_percent"]),
                 "vol_24h": format_large_number(row["volume_usd_24h_exact"]),
                 "vol_chg_24h_%": format_percent_2(row["volume_change_24h_percent"]),
@@ -1123,8 +1168,9 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
             "exchanges": exchanges,
             "exchanges_text": " + ".join(exchanges),
             "best_exchange": str(top_row["exchange"]),
-            "best_rsi_1h": float(group_sorted["rsi_1h"].max()),
-            "best_rsi_4h": float(group_sorted["rsi_4h"].max()),
+            "best_rsi_1h_live": float(group_sorted["rsi_1h_live"].max()),
+            "best_rsi_1h_closed": float(group_sorted["rsi_1h_closed"].max()),
+            "best_rsi_4h_live": float(group_sorted["rsi_4h_live"].max()),
             "best_price_change_24h_percent": float(max_price_change),
             "best_volume_usd_24h_exact": None if pd.isna(max_volume) else float(max_volume),
             "best_volume_change_24h_percent": None if pd.isna(max_volume_change) else float(max_volume_change),
@@ -1136,8 +1182,9 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
         groups,
         key=lambda item: (
             item["signal_rank"],
-            item["best_rsi_4h"],
-            item["best_rsi_1h"],
+            item["best_rsi_4h_live"],
+            item["best_rsi_1h_live"],
+            item["best_rsi_1h_closed"],
             item["best_price_change_24h_percent"],
             item["best_volume_usd_24h_exact"] or 0,
         ),
@@ -1145,7 +1192,6 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
     )
 
     return groups[:max_groups]
-
 
 def prepare_grouped_output_table(grouped_signals):
     if not grouped_signals:
@@ -1159,8 +1205,9 @@ def prepare_grouped_output_table(grouped_signals):
             "symbol": item["symbol"],
             "exchanges": item["exchanges_text"],
             "best_exchange": item["best_exchange"],
-            "best_rsi_1h": round(item["best_rsi_1h"], 2),
-            "best_rsi_4h": round(item["best_rsi_4h"], 2),
+            "best_rsi_1h_live": round(item["best_rsi_1h_live"], 2),
+            "best_rsi_1h_closed": round(item["best_rsi_1h_closed"], 2),
+            "best_rsi_4h_live": round(item["best_rsi_4h_live"], 2),
             "best_chg_24h_%": format_percent_2(item["best_price_change_24h_percent"]),
             "best_vol_24h": format_large_number(item["best_volume_usd_24h_exact"]),
             "best_vol_chg_24h_%": format_percent_2(item["best_volume_change_24h_percent"]),
@@ -1168,7 +1215,6 @@ def prepare_grouped_output_table(grouped_signals):
         })
 
     return pd.DataFrame(rows)
-
 
 def grouped_signal_badges(group):
     """
@@ -1211,15 +1257,14 @@ def format_multi_provider_telegram(
     bitget_active,
 ):
     """
-    Clean Telegram report.
+    Clean English Telegram report.
 
     Display rules:
     - no technical OKX/Bitget universe block;
     - no exchange names in Telegram;
-    - no "Exchange details" section;
+    - no closed 4H RSI;
     - if a pair exists on OKX and Bitget, display OKX values;
-    - if a pair exists only on Bitget, display Bitget values;
-    - GitHub logs still keep provider-level diagnostics.
+    - if a pair exists only on Bitget, display Bitget values.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
@@ -1235,7 +1280,7 @@ def format_multi_provider_telegram(
     lines.append("")
 
     if not grouped_signals:
-        lines.append("✅ Активних сигналів немає.")
+        lines.append("✅ No active signals.")
         return "\n".join(lines)
 
     for idx, group in enumerate(grouped_signals):
@@ -1245,8 +1290,9 @@ def format_multi_provider_telegram(
         detail = group.get("display_detail") or {}
 
         price = html.escape(str(detail.get("price", "N/A")))
-        rsi_1h = html.escape(str(detail.get("rsi_1h", "N/A")))
-        rsi_4h = html.escape(str(detail.get("rsi_4h", "N/A")))
+        rsi_1h_live = html.escape(str(detail.get("rsi_1h_live", "N/A")))
+        rsi_1h_closed = html.escape(str(detail.get("rsi_1h_closed", "N/A")))
+        rsi_4h_live = html.escape(str(detail.get("rsi_4h_live", "N/A")))
         chg_24h = html.escape(str(detail.get("chg_24h_%", "N/A")))
         vol_24h = html.escape(str(detail.get("vol_24h", "N/A")))
         vol_chg = html.escape(str(detail.get("vol_chg_24h_%", "N/A")))
@@ -1255,7 +1301,8 @@ def format_multi_provider_telegram(
         lines.append(f"📌 <b>{symbol}</b>")
         lines.append("")
         lines.append(f"💵 Price: <code>{price}</code>")
-        lines.append(f"📊 RSI 1H/4H: <code>{rsi_1h} / {rsi_4h}</code>")
+        lines.append(f"📊 RSI 1H live/closed: <code>{rsi_1h_live} / {rsi_1h_closed}</code>")
+        lines.append(f"📊 RSI 4H live: <code>{rsi_4h_live}</code>")
         lines.append(f"📈 24h: <code>{chg_24h}%</code>")
         lines.append(f"💰 Vol: <code>{vol_24h}</code>")
         lines.append(f"🔥 Vol chg: <code>{vol_chg}%</code>")
@@ -1283,7 +1330,6 @@ def format_multi_provider_telegram(
             lines.append("")
 
     return "\n".join(lines)
-
 
 # ============================================================
 # MULTI PROVIDER RUNNER
@@ -1318,12 +1364,13 @@ def run_multi_provider_screener():
         df_all = df_all.sort_values(
             by=[
                 "signal_rank",
-                "rsi_4h",
-                "rsi_1h",
+                "rsi_4h_live",
+                "rsi_1h_live",
+                "rsi_1h_closed",
                 "price_change_24h_percent",
                 "volume_usd_24h_exact",
             ],
-            ascending=[False, False, False, False, False],
+            ascending=[False, False, False, False, False, False],
         ).reset_index(drop=True)
 
         df_active = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
