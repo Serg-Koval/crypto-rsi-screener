@@ -19,11 +19,24 @@ KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 RSI_PERIOD = 14
 
-RSI_4H_ALERT = 80
-RSI_4H_EXTREME = 85
-RSI_1H_ALERT = 82
+# New pump-detection thresholds.
+# Closed 4H RSI is intentionally not used in signal classification.
+EARLY_PUMP_RSI_1H_LIVE = 82
+EARLY_PUMP_PRICE_CHANGE_24H = 8
 
-MIN_PRICE_CHANGE_24H = 4
+ACTIVE_OVERHEAT_RSI_1H_LIVE = 82
+ACTIVE_OVERHEAT_RSI_4H_LIVE = 75
+ACTIVE_OVERHEAT_PRICE_CHANGE_24H = 10
+ACTIVE_OVERHEAT_VOLUME_CHANGE_24H = 50
+
+EXTREME_PUMP_RSI_1H_LIVE = 85
+EXTREME_PUMP_RSI_4H_LIVE = 80
+EXTREME_PUMP_PRICE_CHANGE_24H = 20
+EXTREME_PUMP_VOLUME_CHANGE_24H = 100
+
+RSI_1H_CLOSED_CONFIRMATION = 80
+
+MIN_PRICE_CHANGE_24H = EARLY_PUMP_PRICE_CHANGE_24H
 MIN_VOLUME_USD_24H = 5_000_000
 
 PRE_FILTER_TOP_N = 40
@@ -211,14 +224,25 @@ def parse_float_from_value(value):
         return None
 
 
-def classify_signal(rsi_1h_live, rsi_1h_closed, rsi_4h_live, exact_volume_24h, price_change_24h):
+def classify_signal(
+    rsi_1h_live,
+    rsi_1h_closed,
+    rsi_4h_live,
+    exact_volume_24h,
+    volume_change_24h,
+    price_change_24h,
+):
     """
-    New RSI model:
-    - 1H live RSI: fast momentum trigger.
-    - 1H closed RSI: confirmation / quality filter.
-    - 4H live RSI: higher-timeframe live overheat context.
+    Pump-detection signal model.
 
-    Closed 4H RSI is intentionally not used in signal classification.
+    Uses:
+    - RSI 1H live: fast momentum trigger.
+    - RSI 1H closed: quality confirmation, shown in reasons when relevant.
+    - RSI 4H live: higher-timeframe live overheat context.
+
+    Does not use closed 4H RSI.
+    SHORT_WATCHLIST is intentionally not implemented yet because short factors
+    are not implemented yet.
     """
 
     volume_ok = (
@@ -226,63 +250,100 @@ def classify_signal(rsi_1h_live, rsi_1h_closed, rsi_4h_live, exact_volume_24h, p
         exact_volume_24h >= MIN_VOLUME_USD_24H
     )
 
-    price_change_ok = price_change_24h >= MIN_PRICE_CHANGE_24H
-
-    if not volume_ok or not price_change_ok:
+    if not volume_ok:
         return {
             "signal_level": "NO_SIGNAL",
-            "reason": "Filters not passed"
+            "reason": f"24h volume < {format_large_number(MIN_VOLUME_USD_24H)}"
         }
 
-    rsi_4h_live_condition = rsi_4h_live > RSI_4H_ALERT
-    rsi_4h_live_extreme_condition = rsi_4h_live > RSI_4H_EXTREME
-    rsi_1h_live_condition = rsi_1h_live > RSI_1H_ALERT
-    rsi_1h_closed_confirmation = rsi_1h_closed >= 80
+    vol_chg = None if volume_change_24h is None or pd.isna(volume_change_24h) else float(volume_change_24h)
+    vol_spike_50 = vol_chg is not None and vol_chg >= ACTIVE_OVERHEAT_VOLUME_CHANGE_24H
+    vol_spike_100 = vol_chg is not None and vol_chg >= EXTREME_PUMP_VOLUME_CHANGE_24H
+    one_hour_closed_confirmed = rsi_1h_closed >= RSI_1H_CLOSED_CONFIRMATION
 
-    combined_condition = rsi_4h_live_condition and (
-        rsi_1h_live_condition or rsi_1h_closed_confirmation
-    )
+    # Level 3 — strongest pump alert before actual short setup logic.
+    extreme_conditions = [
+        rsi_1h_live >= EXTREME_PUMP_RSI_1H_LIVE,
+        rsi_4h_live >= EXTREME_PUMP_RSI_4H_LIVE,
+        price_change_24h >= EXTREME_PUMP_PRICE_CHANGE_24H,
+        vol_spike_100,
+    ]
 
-    if combined_condition:
-        if rsi_1h_live_condition:
-            one_hour_reason = f"RSI 1H live > {RSI_1H_ALERT}"
-        else:
-            one_hour_reason = "RSI 1H closed >= 80"
+    if all(extreme_conditions):
+        reason_parts = [
+            f"RSI 1H live >= {EXTREME_PUMP_RSI_1H_LIVE}",
+            f"RSI 4H live >= {EXTREME_PUMP_RSI_4H_LIVE}",
+            f"24h change >= {EXTREME_PUMP_PRICE_CHANGE_24H}%",
+            f"volume change >= {EXTREME_PUMP_VOLUME_CHANGE_24H}%",
+        ]
+
+        if one_hour_closed_confirmed:
+            reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
 
         return {
-            "signal_level": "COMBINED_OVERHEAT",
-            "reason": f"{one_hour_reason} and RSI 4H live > {RSI_4H_ALERT}"
+            "signal_level": "EXTREME_PUMP",
+            "reason": " + ".join(reason_parts)
         }
 
-    if rsi_4h_live_extreme_condition:
+    # Level 2 — pump affects higher timeframe live context.
+    active_conditions = [
+        rsi_1h_live >= ACTIVE_OVERHEAT_RSI_1H_LIVE,
+        rsi_4h_live >= ACTIVE_OVERHEAT_RSI_4H_LIVE,
+        price_change_24h >= ACTIVE_OVERHEAT_PRICE_CHANGE_24H,
+        vol_spike_50,
+    ]
+
+    if all(active_conditions):
+        reason_parts = [
+            f"RSI 1H live >= {ACTIVE_OVERHEAT_RSI_1H_LIVE}",
+            f"RSI 4H live >= {ACTIVE_OVERHEAT_RSI_4H_LIVE}",
+            f"24h change >= {ACTIVE_OVERHEAT_PRICE_CHANGE_24H}%",
+            f"volume change >= {ACTIVE_OVERHEAT_VOLUME_CHANGE_24H}%",
+        ]
+
+        if one_hour_closed_confirmed:
+            reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
+
         return {
-            "signal_level": "EXTREME_4H",
-            "reason": f"RSI 4H live > {RSI_4H_EXTREME}"
+            "signal_level": "ACTIVE_OVERHEAT",
+            "reason": " + ".join(reason_parts)
         }
 
-    if rsi_4h_live_condition:
-        return {
-            "signal_level": "STRONG_4H",
-            "reason": f"RSI 4H live > {RSI_4H_ALERT}"
-        }
+    # Level 1 — early pump alert.
+    early_conditions = [
+        rsi_1h_live >= EARLY_PUMP_RSI_1H_LIVE,
+        price_change_24h >= EARLY_PUMP_PRICE_CHANGE_24H,
+    ]
 
-    if rsi_1h_live_condition:
+    if all(early_conditions):
+        reason_parts = [
+            f"RSI 1H live >= {EARLY_PUMP_RSI_1H_LIVE}",
+            f"24h change >= {EARLY_PUMP_PRICE_CHANGE_24H}%",
+            f"24h volume >= {format_large_number(MIN_VOLUME_USD_24H)}",
+        ]
+
+        if vol_spike_50:
+            reason_parts.append(f"volume change >= {ACTIVE_OVERHEAT_VOLUME_CHANGE_24H}%")
+
+        if one_hour_closed_confirmed:
+            reason_parts.append(f"RSI 1H closed >= {RSI_1H_CLOSED_CONFIRMATION}")
+
         return {
-            "signal_level": "EXTREME_1H",
-            "reason": f"RSI 1H live > {RSI_1H_ALERT}"
+            "signal_level": "EARLY_PUMP",
+            "reason": " + ".join(reason_parts)
         }
 
     return {
         "signal_level": "NO_SIGNAL",
-        "reason": "RSI filters not passed"
+        "reason": "Pump filters not passed"
     }
+
 
 def get_signal_rank(signal_level):
     ranks = {
-        "COMBINED_OVERHEAT": 4,
-        "EXTREME_4H": 3,
-        "STRONG_4H": 2,
-        "EXTREME_1H": 1,
+        "EXTREME_PUMP": 3,
+        "ACTIVE_OVERHEAT": 2,
+        "EARLY_PUMP": 1,
         "NO_SIGNAL": 0,
     }
 
@@ -542,6 +603,7 @@ def okx_analyze_candidate(inst_id, ticker_row):
         rsi_1h_closed=rsi_1h_closed,
         rsi_4h_live=rsi_4h_live,
         exact_volume_24h=exact_volume_24h,
+        volume_change_24h=volume_change_24h,
         price_change_24h=price_change_24h,
     )
 
@@ -889,6 +951,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
         rsi_1h_closed=rsi_1h_closed,
         rsi_4h_live=rsi_4h_live,
         exact_volume_24h=exact_volume_24h,
+        volume_change_24h=volume_change_24h,
         price_change_24h=price_change_24h,
     )
 
@@ -967,10 +1030,9 @@ def get_telegram_credentials():
 
 def telegram_signal_label(signal_level):
     labels = {
-        "COMBINED_OVERHEAT": "🔴🔴 COMBINED OVERHEAT",
-        "EXTREME_4H": "🔴 EXTREME 4H",
-        "STRONG_4H": "🟠 STRONG 4H",
-        "EXTREME_1H": "🟡 EXTREME 1H",
+        "EXTREME_PUMP": "🔴 EXTREME PUMP",
+        "ACTIVE_OVERHEAT": "🟠 ACTIVE OVERHEAT",
+        "EARLY_PUMP": "🟡 EARLY PUMP",
         "NO_SIGNAL": "⚪ NO SIGNAL",
     }
 
