@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r1"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r2"
 
 RSI_PERIOD = 14
 
@@ -52,6 +52,7 @@ LIQUIDITY_SWEEP_LOOKBACKS = {
 LIQUIDITY_SWEEP_MIN_BREAK_PCT = 0.001      # 0.10% above previous high
 LIQUIDITY_SWEEP_MIN_CLOSE_BACK_PCT = 0.0005 # 0.05% close back below previous high
 LIQUIDITY_SWEEP_LIVE_INVALIDATION_PCT = 0.0005 # current/live candle reclaimed level
+LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 # swept high must be at least 5 candles old
 PREMIUM_ZONE_LOOKBACK = 72
 PREMIUM_ZONE_LOOKBACK_1H = 72
 PREMIUM_ZONE_LOOKBACK_4H = 42
@@ -395,7 +396,7 @@ def get_live_candle_for_analysis(df):
     return work_df.iloc[live_index], live_index
 
 
-def previous_high_before_index(df, candle_index, lookback):
+def previous_high_info_before_index(df, candle_index, lookback):
     if df is None or df.empty:
         return None
 
@@ -410,7 +411,30 @@ def previous_high_before_index(df, candle_index, lookback):
     if previous.empty:
         return None
 
-    return float(previous["high"].max())
+    highs = pd.to_numeric(previous["high"], errors="coerce")
+    valid_highs = highs.dropna()
+
+    if valid_highs.empty:
+        return None
+
+    high_index = int(valid_highs.idxmax())
+    previous_high = float(valid_highs.loc[high_index])
+    level_age_bars = int(candle_index - high_index)
+
+    return {
+        "high": previous_high,
+        "index": high_index,
+        "age_bars": level_age_bars,
+    }
+
+
+def previous_high_before_index(df, candle_index, lookback):
+    high_info = previous_high_info_before_index(df, candle_index, lookback)
+
+    if high_info is None:
+        return None
+
+    return float(high_info["high"])
 
 
 def evaluate_sweep_against_previous_high(
@@ -447,11 +471,13 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
 
     Confirmed sweep:
     - last closed 1H candle swept previous 12H/24H high;
-    - last closed 1H candle closed back below that high.
+    - last closed 1H candle closed back below that high;
+    - swept high must be at least LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS candles old.
 
     Live sweep candidate:
     - current live 1H candle swept previous 12H/24H high;
     - current live 1H candle is currently back below that high;
+    - swept high must be at least LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS candles old;
     - candle is not closed yet, so the signal can still turn into a breakout.
 
     Priority:
@@ -492,12 +518,19 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
 
     # Confirmed closed-candle sweep.
     for label, lookback, points in tiers:
-        previous_high = previous_high_before_index(df, closed_index, lookback)
+        previous_high_info = previous_high_info_before_index(df, closed_index, lookback)
 
-        if previous_high is None:
+        if previous_high_info is None:
             continue
 
         checked_any = True
+
+        # Fresh highs are not treated as liquidity sweep levels.
+        # They are part of the current impulse / continuation attempt, not established liquidity.
+        if int(previous_high_info.get("age_bars", 0)) < LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS:
+            continue
+
+        previous_high = float(previous_high_info["high"])
 
         if evaluate_sweep_against_previous_high(closed_candle, previous_high):
             if live_index is not None and closed_index is not None and live_index != closed_index:
@@ -527,12 +560,18 @@ def detect_liquidity_sweep(df_1h, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
     # If live_index == closed_index, then the latest candle is already closed, so no live candidate exists.
     if live_index is not None and closed_index is not None and live_index != closed_index:
         for label, lookback, points in tiers:
-            previous_high = previous_high_before_index(df, live_index, lookback)
+            previous_high_info = previous_high_info_before_index(df, live_index, lookback)
 
-            if previous_high is None:
+            if previous_high_info is None:
                 continue
 
             checked_any = True
+
+            # Fresh highs are not treated as live sweep candidates either.
+            if int(previous_high_info.get("age_bars", 0)) < LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS:
+                continue
+
+            previous_high = float(previous_high_info["high"])
 
             if evaluate_sweep_against_previous_high(live_candle, previous_high):
                 return make_factor(
