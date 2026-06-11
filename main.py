@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import html
 import requests
@@ -17,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r8"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r9"
 
 RSI_PERIOD = 14
 
@@ -1077,11 +1078,11 @@ def liquidity_level_points(level):
     return 1
 
 
-def make_confirmed_sweep_factor(level, confirm_tf):
+def make_confirmed_sweep_factor(level, confirm_tf, confirm_candle=None):
     swept_price = float(level["price"])
     level_label = liquidity_level_label(level)
 
-    return make_factor(
+    factor = make_factor(
         key="liquidity_sweep",
         label="Liquidity sweep",
         status="confirmed",
@@ -1092,6 +1093,36 @@ def make_confirmed_sweep_factor(level, confirm_tf):
             else f"{level_label} {format_price_2(swept_price)} swept, {confirm_tf} close below"
         ),
     )
+
+    confirm_high = None
+    confirm_close = None
+
+    if confirm_candle is not None:
+        try:
+            confirm_high = float(confirm_candle["high"])
+            confirm_close = float(confirm_candle["close"])
+        except (KeyError, TypeError, ValueError):
+            confirm_high = None
+            confirm_close = None
+
+    factor["debug"] = {
+        "result": "accepted",
+        "status": "confirmed",
+        "level_tf": str(level.get("timeframe", "N/A")),
+        "level_type": str(level.get("type", "N/A")),
+        "level_price": swept_price,
+        "age_bars": int(level.get("age_bars", 0)),
+        "age_hours": float(level.get("age_hours", 0.0)),
+        "touches": int(level.get("touches", 1)),
+        "quality": int(level.get("quality", 0)),
+        "reaction_pct": float(level.get("reaction_pct", 0.0)) * 100,
+        "confirm_tf": str(confirm_tf),
+        "confirm_high": confirm_high,
+        "confirm_close": confirm_close,
+        "reason": "confirmed liquidity sweep",
+    }
+
+    return factor
 
 
 def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACKS):
@@ -1151,7 +1182,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
         )
 
         if swept_1h is not None:
-            confirmed_candidates.append((swept_1h, "1H"))
+            confirmed_candidates.append((swept_1h, "1H", closed_1h_candle))
 
     # 4H closed candle can confirm 4H levels, and can also confirm older 1H levels.
     if df_4h is not None and not df_4h.empty:
@@ -1174,7 +1205,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
             )
 
             if swept_4h_level is not None:
-                confirmed_candidates.append((swept_4h_level, "4H"))
+                confirmed_candidates.append((swept_4h_level, "4H", closed_4h_candle))
 
             # Optional stronger confirmation: a closed 4H candle can confirm pre-existing 1H liquidity levels.
             candle_4h_time = get_candle_timestamp_value(closed_4h_candle)
@@ -1196,7 +1227,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
                 )
 
                 if swept_1h_by_4h is not None:
-                    confirmed_candidates.append((swept_1h_by_4h, "4H"))
+                    confirmed_candidates.append((swept_1h_by_4h, "4H", closed_4h_candle))
 
     if not confirmed_candidates:
         return make_factor(
@@ -1207,7 +1238,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
         )
 
     # Select strongest confirmed sweep across allowed confirmations.
-    best_level, best_confirm_tf = sorted(
+    best_level, best_confirm_tf, best_confirm_candle = sorted(
         confirmed_candidates,
         key=lambda item: (
             get_timeframe_hours(item[1]),
@@ -1230,7 +1261,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
             detail="no confirmed 1H/4H liquidity sweep",
         )
 
-    return make_confirmed_sweep_factor(best_level, best_confirm_tf)
+    return make_confirmed_sweep_factor(best_level, best_confirm_tf, best_confirm_candle)
 
 def classify_premium_position(position):
     if position is None or pd.isna(position):
@@ -3103,6 +3134,82 @@ def compact_factor_detail(factors, key, default="N/A"):
     return detail
 
 
+
+def format_debug_value(value):
+    if value is None:
+        return "N/A"
+
+    if isinstance(value, float):
+        if pd.isna(value):
+            return "N/A"
+        return f"{value:.6g}"
+
+    text = str(value).strip()
+
+    if not text:
+        return "N/A"
+
+    return "_".join(text.split())
+
+
+def log_sweep_debug_for_grouped_signals(grouped_signals):
+    """
+    Print one compact SWEEP_DEBUG line per Telegram-visible signal.
+
+    This is intentionally written to GitHub Actions logs only. It does not
+    change Telegram output and helps validate why the sweep factor accepted or
+    rejected a level when we compare signals with charts.
+    """
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for group in grouped_signals or []:
+        if str(group.get("signal_level")) not in visible_levels:
+            continue
+
+        detail = group.get("display_detail") or {}
+        short_factors = detail.get("short_factors", []) or []
+        sweep_factor = find_factor(short_factors, "liquidity_sweep") or {}
+        debug = sweep_factor.get("debug") or {}
+
+        fields = [
+            "SWEEP_DEBUG",
+            f"symbol={format_debug_value(group.get('symbol'))}",
+            f"exchange={format_debug_value(detail.get('exchange'))}",
+            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
+            f"status={format_debug_value(sweep_factor.get('status'))}",
+        ]
+
+        if debug:
+            ordered_debug_keys = [
+                "result",
+                "level_tf",
+                "level_type",
+                "level_price",
+                "age_bars",
+                "age_hours",
+                "touches",
+                "quality",
+                "reaction_pct",
+                "confirm_tf",
+                "confirm_high",
+                "confirm_close",
+                "reason",
+            ]
+
+            for key in ordered_debug_keys:
+                if key in debug:
+                    fields.append(f"{key}={format_debug_value(debug.get(key))}")
+        else:
+            fields.append(f"detail={format_debug_value(sweep_factor.get('detail'))}")
+
+        print(" ".join(fields))
+
+
 def format_multi_provider_telegram(
     grouped_signals,
     okx_total,
@@ -3255,6 +3362,7 @@ def run_multi_provider_screener():
 
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
+    log_sweep_debug_for_grouped_signals(grouped_signals)
     df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
@@ -3284,7 +3392,208 @@ def run_multi_provider_screener():
         send_telegram_message_safe(message)
 
 
+
+# ============================================================
+# SELF TESTS
+# ============================================================
+
+def make_synthetic_ohlcv(rows, freq="1h"):
+    timestamps = pd.date_range("2026-01-01", periods=len(rows), freq=freq)
+    df = pd.DataFrame(rows, columns=["open", "high", "low", "close", "confirm"])
+    df["timestamp"] = timestamps
+    df["volume"] = 1.0
+    df["quote_volume"] = 1.0
+
+    return df[["timestamp", "open", "high", "low", "close", "volume", "quote_volume", "confirm"]]
+
+
+def make_flat_synthetic_1h(rows_count=31, price=90.0):
+    rows = []
+
+    for i in range(rows_count):
+        confirm = 0 if i == rows_count - 1 else 1
+        rows.append((price, price + 0.5, price - 0.5, price, confirm))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+
+def make_flat_synthetic_4h(rows_count=15, price=90.0):
+    rows = []
+
+    for i in range(rows_count):
+        confirm = 0 if i == rows_count - 1 else 1
+        rows.append((price, price + 0.5, price - 0.5, price, confirm))
+
+    return make_synthetic_ohlcv(rows, freq="4h")
+
+
+def make_4h_swing_sweep_case(level_age_bars=5, confirm_with_4h=True):
+    level_index = 4
+    candidate_index = level_index + int(level_age_bars)
+    rows_count = candidate_index + 2
+    rows = []
+
+    for i in range(rows_count):
+        if i == level_index:
+            rows.append((98.0, 100.0, 97.0, 98.0, 1))
+        elif i == candidate_index and confirm_with_4h:
+            rows.append((99.0, 100.3, 92.0, 95.0, 1))
+        elif i == rows_count - 1:
+            rows.append((94.0, 95.0, 93.0, 94.0, 0))
+        elif i < level_index:
+            base = 95.0 + i * 0.5
+            rows.append((base, base + 1.0, 94.0, 95.0, 1))
+        else:
+            rows.append((94.0, 97.0, 90.0, 94.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="4h")
+
+
+def make_4h_level_without_4h_sweep_case():
+    rows = []
+
+    for i in range(12):
+        if i == 4:
+            rows.append((98.0, 100.0, 97.0, 98.0, 1))
+        elif i == 9:
+            rows.append((95.0, 97.0, 92.0, 94.0, 1))
+        elif i == 11:
+            rows.append((94.0, 95.0, 93.0, 94.0, 0))
+        elif i < 4:
+            base = 95.0 + i * 0.5
+            rows.append((base, base + 1.0, 94.0, 95.0, 1))
+        else:
+            rows.append((94.0, 97.0, 90.0, 94.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="4h")
+
+
+def make_1h_intrabar_take_of_4h_level_case():
+    rows = []
+
+    for i in range(31):
+        if i == 29:
+            rows.append((99.0, 100.3, 94.0, 95.0, 1))
+        elif i == 30:
+            rows.append((94.0, 95.0, 93.0, 94.0, 0))
+        else:
+            rows.append((90.0, 90.5, 89.5, 90.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+
+def make_1h_equal_high_sweep_case():
+    rows = []
+
+    for i in range(31):
+        if i == 5:
+            rows.append((98.0, 100.0, 97.0, 98.0, 1))
+        elif i == 12:
+            rows.append((98.0, 100.1, 97.0, 98.0, 1))
+        elif i == 29:
+            rows.append((99.0, 100.4, 92.0, 95.0, 1))
+        elif i == 30:
+            rows.append((94.0, 95.0, 93.0, 94.0, 0))
+        elif i in [3, 4, 6, 7, 10, 11, 13, 14]:
+            rows.append((94.0, 97.0, 90.0, 94.0, 1))
+        else:
+            rows.append((93.0, 96.0, 90.0, 93.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+
+def make_rolling_only_high_take_case():
+    rows = []
+
+    for i in range(31):
+        if i == 28:
+            rows.append((98.0, 100.0, 97.0, 99.0, 1))
+        elif i == 29:
+            rows.append((99.0, 100.3, 94.0, 95.0, 1))
+        elif i == 30:
+            rows.append((94.0, 95.0, 93.0, 94.0, 0))
+        else:
+            rows.append((90.0, 95.0, 89.0, 90.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+
+def run_sweep_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING SWEEP SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    tests = []
+
+    tests.append((
+        "4H level age 4 bars -> no sweep",
+        detect_liquidity_sweep(
+            df_1h=make_flat_synthetic_1h(),
+            df_4h=make_4h_swing_sweep_case(level_age_bars=4),
+        ),
+        "not_confirmed",
+    ))
+
+    tests.append((
+        "4H level age 5 bars -> confirmed",
+        detect_liquidity_sweep(
+            df_1h=make_flat_synthetic_1h(),
+            df_4h=make_4h_swing_sweep_case(level_age_bars=5),
+        ),
+        "confirmed",
+    ))
+
+    tests.append((
+        "4H level + 1H close only -> no sweep",
+        detect_liquidity_sweep(
+            df_1h=make_1h_intrabar_take_of_4h_level_case(),
+            df_4h=make_4h_level_without_4h_sweep_case(),
+        ),
+        "not_confirmed",
+    ))
+
+    tests.append((
+        "1H equal highs + 1H close below -> confirmed",
+        detect_liquidity_sweep(
+            df_1h=make_1h_equal_high_sweep_case(),
+            df_4h=make_flat_synthetic_4h(),
+        ),
+        "confirmed",
+    ))
+
+    tests.append((
+        "rolling-only 12H/24H take -> no sweep",
+        detect_liquidity_sweep(
+            df_1h=make_rolling_only_high_take_case(),
+            df_4h=make_flat_synthetic_4h(),
+        ),
+        "not_confirmed",
+    ))
+
+    failed = 0
+
+    for name, result, expected_status in tests:
+        actual_status = str(result.get("status"))
+        detail = str(result.get("detail", ""))
+        ok = actual_status == expected_status
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"Sweep self-tests failed: {failed}/{len(tests)}")
+
+    print(f"SWEEP SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def main():
+    if "--self-test" in sys.argv:
+        run_sweep_self_tests()
+        return
+
     get_telegram_credentials()
     run_multi_provider_screener()
 
