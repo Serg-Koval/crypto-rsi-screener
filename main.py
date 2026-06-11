@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r4"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r6"
 
 RSI_PERIOD = 14
 
@@ -68,10 +68,6 @@ LOCAL_HIGH_LOOKBACKS = {
     "48H": 48,
     "7D": 168,
 }
-REJECTION_VOLUME_LOOKBACK = 20
-REJECTION_UPPER_WICK_BODY_MULTIPLIER = 1.5
-REJECTION_VOLUME_MULTIPLIER = 1.5
-
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 TELEGRAM_MAX_SIGNALS = 10
@@ -868,8 +864,8 @@ def candle_has_sweep_failure_character(candle):
     """
     A buy-side sweep should show at least minimal failed-continuation character.
 
-    This is intentionally weaker than the separate Rejection candle factor. It only
-    prevents a simple level-take / pullback from being counted as a liquidity sweep.
+    This lightweight failure check prevents a simple level-take / pullback
+    from being counted as a liquidity sweep.
     """
 
     if candle is None:
@@ -1018,16 +1014,30 @@ def select_best_confirmed_swept_level(candle, levels, confirm_tf, df_context, ca
 
 
 def liquidity_level_label(level):
+    """
+    User-facing liquidity level label for Telegram.
+
+    Keep it concise:
+    - 1H swing high -> 1H high
+    - 4H swing high -> 4H high
+    - 1H equal highs + touches -> 1H equal highs x3
+    """
+
     if not level:
         return "liquidity level"
 
-    label = str(level.get("type", "liquidity level"))
+    raw_label = str(level.get("type", "liquidity level"))
+    timeframe = str(level.get("timeframe", "")).strip()
     touches = int(level.get("touches", 1))
 
-    if touches >= 2 and "equal" in label:
-        return f"{label} x{touches}"
+    if "equal highs" in raw_label:
+        base = f"{timeframe} equal highs" if timeframe else "equal highs"
+        return f"{base} x{touches}" if touches >= 2 else base
 
-    return label
+    if "swing high" in raw_label:
+        return f"{timeframe} high" if timeframe else "swing high"
+
+    return raw_label
 
 
 def liquidity_level_points(level):
@@ -1048,7 +1058,11 @@ def make_confirmed_sweep_factor(level, confirm_tf):
         label="Liquidity sweep",
         status="confirmed",
         points=liquidity_level_points(level),
-        detail=f"{confirm_tf} closed below {level_label} {format_price_2(swept_price)}",
+        detail=(
+            f"{level_label} {format_price_2(swept_price)} swept, close below"
+            if str(confirm_tf) == str(level.get("timeframe", ""))
+            else f"{level_label} {format_price_2(swept_price)} swept, {confirm_tf} close below"
+        ),
     )
 
 
@@ -1365,115 +1379,23 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
     )
 
 
-def detect_rejection_candle(
-    df_1h,
-    volume_lookback=REJECTION_VOLUME_LOOKBACK,
-    wick_body_multiplier=REJECTION_UPPER_WICK_BODY_MULTIPLIER,
-    volume_multiplier=REJECTION_VOLUME_MULTIPLIER,
-):
-    """
-    Detect a confirmed 1H rejection candle using only the last closed candle.
-
-    Important:
-    - Live candles are intentionally ignored for rejection confirmation.
-    - This prevents a still-forming impulse candle from being counted as a confirmed short trigger.
-    """
-
-    if df_1h is None or df_1h.empty:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="not_enough_data",
-            detail="1H: no candles",
-        )
-
-    df = df_1h.copy().reset_index(drop=True)
-    closed_candle, closed_index = get_last_closed_candle_for_analysis(df)
-
-    if closed_candle is None or closed_index is None:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="not_enough_data",
-            detail="1H closed: no closed candle",
-        )
-
-    if closed_index < volume_lookback:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="not_enough_data",
-            detail=f"requires {volume_lookback} closed 1H candles before trigger candle",
-        )
-
-    current = closed_candle
-
-    open_price = float(current["open"])
-    high_price = float(current["high"])
-    low_price = float(current["low"])
-    close_price = float(current["close"])
-
-    candle_range = high_price - low_price
-
-    if candle_range <= 0:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="not_enough_data",
-            detail="1H closed: invalid candle range",
-        )
-
-    body = abs(close_price - open_price)
-    body_reference = max(body, candle_range * 0.05)
-    upper_wick = high_price - max(open_price, close_price)
-    midpoint = low_price + candle_range * 0.5
-
-    volume_series = get_volume_series(df)
-    current_volume_raw = volume_series.iloc[closed_index]
-    previous_volume_window = volume_series.iloc[closed_index - volume_lookback:closed_index]
-
-    current_volume = float(current_volume_raw) if not pd.isna(current_volume_raw) else np.nan
-    previous_avg_volume = float(previous_volume_window.mean())
-
-    if pd.isna(current_volume) or pd.isna(previous_avg_volume) or previous_avg_volume <= 0:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="not_enough_data",
-            detail="1H closed: volume unavailable",
-        )
-
-    wick_ok = upper_wick >= body_reference * wick_body_multiplier
-    weak_close = close_price < midpoint
-    volume_ok = current_volume >= previous_avg_volume * volume_multiplier
-
-    confirmed = wick_ok and weak_close and volume_ok
-
-    if confirmed:
-        return make_factor(
-            key="rejection_candle",
-            label="Rejection candle",
-            status="confirmed",
-            points=2,
-            detail=f"1H closed: upper wick + weak close + volume {current_volume / previous_avg_volume:.1f}x",
-        )
-
-    return make_factor(
-        key="rejection_candle",
-        label="Rejection candle",
-        status="not_confirmed",
-        detail="1H closed: no wick/weak-close/volume confirmation",
-    )
-
-
 def analyze_short_factors(df_1h, df_4h=None):
+    """
+    Current short-watch factor set.
+
+    Active factors:
+    - Liquidity sweep: trigger factor.
+    - Premium zone: location factor.
+    - Local high update: extension/location context.
+
+    """
+
     premium_factor = detect_premium_zone(df_1h, df_4h)
 
     factors = [
         detect_liquidity_sweep(df_1h, df_4h=df_4h),
         premium_factor,
         detect_local_high_update(df_1h),
-        detect_rejection_candle(df_1h),
     ]
 
     score = sum(int(factor.get("points", 0)) for factor in factors)
@@ -1487,7 +1409,6 @@ def analyze_short_factors(df_1h, df_4h=None):
         "total_count": total_count,
         "premium_factor": premium_factor,
     }
-
 
 def calculate_scores(
     rsi_1h_live,
@@ -1599,6 +1520,7 @@ def is_factor_confirmed(short_factors, key):
     return bool(factor and factor.get("status") == "confirmed")
 
 
+
 def calculate_location_trigger_context(short_factors):
     """
     Split short analysis into location context and trigger confirmation.
@@ -1608,8 +1530,7 @@ def calculate_location_trigger_context(short_factors):
     - Local high update
 
     Trigger / confirmation:
-    - Liquidity sweep
-    - Rejection candle
+    - Confirmed liquidity sweep only
     """
 
     premium = get_short_factor(short_factors, "premium_zone") or {}
@@ -1618,10 +1539,9 @@ def calculate_location_trigger_context(short_factors):
     liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
     liquidity_candidate = liquidity.get("status") == "candidate"
-    rejection_confirmed = is_factor_confirmed(short_factors, "rejection_candle")
 
     location_score = int(premium.get("points", 0)) + int(local_high.get("points", 0))
-    trigger_count = int(liquidity_confirmed) + int(rejection_confirmed)
+    trigger_count = int(liquidity_confirmed)
     early_trigger_count = int(liquidity_candidate)
 
     trigger_parts = []
@@ -1629,22 +1549,14 @@ def calculate_location_trigger_context(short_factors):
     if liquidity_confirmed:
         trigger_parts.append("liquidity sweep")
 
-    if liquidity_candidate:
-        trigger_parts.append("live liquidity sweep candidate")
-
-    if rejection_confirmed:
-        trigger_parts.append("rejection candle")
-
     return {
         "location_score": location_score,
         "trigger_count": trigger_count,
         "early_trigger_count": early_trigger_count,
         "liquidity_confirmed": liquidity_confirmed,
         "liquidity_candidate": liquidity_candidate,
-        "rejection_confirmed": rejection_confirmed,
         "trigger_parts": trigger_parts,
     }
-
 
 def quality_location_label(score):
     score = int(score or 0)
@@ -1658,22 +1570,12 @@ def quality_location_label(score):
     return "None"
 
 
-def quality_trigger_label_from_context(context):
-    trigger_count = int(context.get("trigger_count", 0))
-    liquidity_confirmed = bool(context.get("liquidity_confirmed"))
-    rejection_confirmed = bool(context.get("rejection_confirmed"))
 
-    if trigger_count >= 2:
-        return "Confirmed — 1H liquidity sweep + 1H rejection"
+def quality_trigger_label_from_context(context):
+    liquidity_confirmed = bool(context.get("liquidity_confirmed"))
 
     if liquidity_confirmed:
-        return "Partial — 1H liquidity sweep only"
-
-    if rejection_confirmed:
-        return "Partial — 1H rejection only"
-
-    if bool(context.get("liquidity_candidate")):
-        return "Early — 1H live liquidity sweep candidate"
+        return "Confirmed liquidity sweep"
 
     return "None"
 
@@ -1683,24 +1585,20 @@ def build_setup_status(signal_level, scores, short_factors):
     context = calculate_location_trigger_context(short_factors)
     location_score = int(context.get("location_score", 0))
     trigger_count = int(context.get("trigger_count", 0))
-    rejection_confirmed = bool(context.get("rejection_confirmed"))
-    liquidity_candidate = bool(context.get("liquidity_candidate"))
     has_overheat_context = bool(scores.get("has_overheat_context", False))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        return "High priority watch — strong heat, premium/location, and confirmed 1H trigger are aligned"
+        return "High priority watch — strong heat, premium/location, and confirmed liquidity sweep are aligned"
 
     if signal_level == "SHORT_WATCH":
-        if trigger_count >= 2:
-            return "Short watch — 1H liquidity sweep + 1H rejection detected"
-        if rejection_confirmed:
-            return "Short watch — 1H rejection detected, liquidity sweep not confirmed"
-        return "Short watch — 1H liquidity sweep detected, rejection still missing"
+        if trigger_count >= 1:
+            return "Short watch — confirmed liquidity sweep detected"
+        return "Short watch — waiting for confirmed liquidity sweep"
 
     if signal_level == "OVERHEAT_WATCH":
         if location_score > 0:
-            return "Overheat watch — RSI heat confirmed; waiting for confirmed 1H short trigger"
-        return "Overheat watch — RSI heat confirmed; waiting for premium/location and 1H trigger"
+            return "Overheat watch — RSI heat confirmed; waiting for confirmed liquidity sweep"
+        return "Overheat watch — RSI heat confirmed; waiting for premium/location and confirmed sweep"
 
     if signal_level == "PUMP_WATCH":
         missing = []
@@ -1712,12 +1610,7 @@ def build_setup_status(signal_level, scores, short_factors):
             missing.append("premium/location")
 
         if trigger_count == 0:
-            if liquidity_candidate:
-                missing.append("confirmed 1H trigger")
-            else:
-                missing.append("1H short trigger")
-        elif not rejection_confirmed:
-            missing.append("1H rejection")
+            missing.append("confirmed liquidity sweep")
 
         if missing:
             return "Watch only — missing " + " / ".join(missing)
@@ -1725,7 +1618,6 @@ def build_setup_status(signal_level, scores, short_factors):
         return "Watch only — setup quality is still insufficient"
 
     return "No watch setup"
-
 
 def build_watch_reason(signal_level, scores, short_factors):
     pump_quality = quality_pump_label(scores.get("pump_score", 0))
@@ -3045,47 +2937,139 @@ def build_quality_labels(detail):
 
 
 
+
+def factor_status_icon(factor):
+    status = (factor or {}).get("status")
+
+    if status == "confirmed":
+        return "✅"
+    if status == "not_enough_data":
+        return "⚪"
+    return "❌"
+
+
 def compact_factor_summary(factors):
+    """
+    Legacy compact summary helper kept for internal/debug use.
+    Telegram output now uses user-facing factor lines instead.
+    """
+
     factor_keys = [
         ("liquidity_sweep", "Sweep"),
         ("premium_zone", "Prem"),
-        ("local_high_update", "High"),
-        ("rejection_candle", "Rej"),
+        ("local_high_update", "LocalHigh"),
     ]
 
     parts = []
 
     for key, label in factor_keys:
         factor = find_factor(factors, key) or {}
-        status = factor.get("status")
-
-        if status == "confirmed":
-            icon = "✅"
-        elif status == "candidate":
-            icon = "⚠️"
-        elif status == "not_enough_data":
-            icon = "⚪"
-        else:
-            icon = "❌"
-
-        parts.append(f"{icon} {label}")
+        parts.append(f"{factor_status_icon(factor)} {label}")
 
     return " | ".join(parts)
 
 
+def format_sweep_detail_for_telegram(factors):
+    factor = find_factor(factors, "liquidity_sweep") or {}
+    status = factor.get("status")
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if status == "confirmed" and detail:
+        return detail
+
+    if status == "not_enough_data":
+        return "Data unavailable"
+
+    return "No confirmed sweep"
+
+
+def format_local_high_detail_for_telegram(factors):
+    factor = find_factor(factors, "local_high_update") or {}
+    status = factor.get("status")
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if status == "confirmed":
+        cleaned = detail.replace("1H: ", "").strip()
+        cleaned = cleaned.replace("new ", "")
+
+        # Examples:
+        # "24H high" -> "24H high updated"
+        # "7D high"  -> "7D high updated"
+        if cleaned:
+            return f"{cleaned} updated"
+
+        return "Local high updated"
+
+    if status == "not_enough_data":
+        return "Data unavailable"
+
+    return "not updated"
+
+
+def format_premium_value_for_telegram(value):
+    """
+    Convert internal premium labels into compact user-facing Telegram text.
+
+    Examples:
+    - "Premium / 0.75" -> "Premium 0.75"
+    - "Extreme Premium / 0.80" -> "Extreme 0.80"
+    - "Above Range High / 1.05" -> "Above Range 1.05"
+    """
+
+    text = str(value or "N/A").strip()
+
+    if not text or text == "N/A":
+        return "N/A"
+
+    parts = [part.strip() for part in text.split("/")]
+    label = parts[0] if parts else text
+    number = parts[1] if len(parts) > 1 else ""
+
+    label = label.replace("Extreme Premium", "Extreme")
+    label = label.replace("Above Range High", "Above Range")
+
+    if number:
+        return f"{label} {number}"
+
+    return label
+
+
+def format_reason_for_telegram(setup_status):
+    text = str(setup_status or "N/A").strip()
+
+    replacements = {
+        "High priority watch — ": "",
+        "Short watch — ": "",
+        "Overheat watch — ": "",
+        "Watch only — ": "",
+    }
+
+    for prefix, replacement in replacements.items():
+        if text.startswith(prefix):
+            text = replacement + text[len(prefix):]
+            break
+
+    if text == "confirmed liquidity sweep detected":
+        return "confirmed liquidity sweep"
+
+    return text[:1].lower() + text[1:] if text else "N/A"
+
+
 def compact_factor_detail(factors, key, default="N/A"):
+    if key == "liquidity_sweep":
+        return format_sweep_detail_for_telegram(factors)
+
+    if key == "local_high_update":
+        return format_local_high_detail_for_telegram(factors)
+
     factor = find_factor(factors, key) or {}
     detail = str(factor.get("detail", "") or "").strip()
 
     if not detail:
         return default
 
-    detail = detail.replace("Liquidity sweep", "Sweep")
-    detail = detail.replace("Rejection candle", "Rej")
-    detail = detail.replace("1H: ", "")
-    detail = detail.replace("1H closed: ", "closed: ")
-
     return detail
+
 
 def format_multi_provider_telegram(
     grouped_signals,
@@ -3097,31 +3081,44 @@ def format_multi_provider_telegram(
     bitget_active,
 ):
     """
-    Compact Telegram report with a single Short Watch Analysis block.
+    Compact user-facing Telegram report.
+
+    PUMP WATCH is intentionally hidden from Telegram. It remains available in
+    internal scoring/output tables, but Telegram shows only actionable watchlist
+    context: OVERHEAT, SHORT WATCH and HIGH PRIORITY SHORT WATCH.
     """
 
     now_kyiv = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M Kyiv")
 
-    lines = []
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
 
-    total_short_count = len(grouped_signals) if grouped_signals else 0
-    display_groups = (grouped_signals or [])[:TELEGRAM_MAX_SIGNALS]
+    visible_groups = [
+        group for group in (grouped_signals or [])
+        if str(group.get("signal_level")) in visible_levels
+    ]
+
+    total_visible_count = len(visible_groups)
+    display_groups = visible_groups[:TELEGRAM_MAX_SIGNALS]
     displayed_count = len(display_groups)
 
+    lines = []
     lines.append("📊 <b>Market Heat Scanner</b>")
-    lines.append(f"🕒 <code>{html.escape(now_kyiv)}</code>")
-    lines.append(f"🧩 <code>{html.escape(SCRIPT_VERSION)}</code>")
+    lines.append(f"{html.escape(now_kyiv)} | {html.escape(SCRIPT_VERSION)}")
 
-    if total_short_count > displayed_count:
-        lines.append(f"Shown: <b>{displayed_count}</b>/<b>{total_short_count}</b>")
+    if total_visible_count > displayed_count:
+        lines.append(f"Shown: <b>{displayed_count}</b>/<b>{total_visible_count}</b>")
 
     if not display_groups:
-        lines.append("✅ No short-watch signals.")
+        lines.append("")
+        lines.append("✅ No overheat or short-watch signals.")
     else:
         for idx, group in enumerate(display_groups):
             signal_label = telegram_signal_label(group["signal_level"])
             symbol = html.escape(str(group["symbol"]))
-
             detail = group.get("display_detail") or {}
 
             price = html.escape(str(detail.get("price", "N/A")))
@@ -3135,19 +3132,28 @@ def format_multi_provider_telegram(
 
             short_factors = detail.get("short_factors", []) or []
             premium_info = format_premium_line_from_factors(short_factors)
-            premium_1h = html.escape(premium_info["premium_1h"])
-            premium_4h = html.escape(premium_info["premium_4h"])
-            factor_summary = html.escape(compact_factor_summary(short_factors))
-            sweep_detail = html.escape(compact_factor_detail(short_factors, "liquidity_sweep", "N/A"))
+            premium_1h = html.escape(format_premium_value_for_telegram(premium_info["premium_1h"]))
+            premium_4h = html.escape(format_premium_value_for_telegram(premium_info["premium_4h"]))
+
+            sweep_factor = find_factor(short_factors, "liquidity_sweep") or {}
+            local_high_factor = find_factor(short_factors, "local_high_update") or {}
+
+            sweep_icon = factor_status_icon(sweep_factor)
+            local_high_icon = factor_status_icon(local_high_factor)
+            sweep_detail = html.escape(format_sweep_detail_for_telegram(short_factors))
+            local_high_detail = html.escape(format_local_high_detail_for_telegram(short_factors))
+
+            reason = html.escape(format_reason_for_telegram(setup_status))
 
             lines.append("")
-            lines.append(f"{idx + 1}) {signal_label} | <code>{symbol}</code>")
-            lines.append(f"💵 <code>{price}</code> | 24h <code>{chg_24h}%</code> | Vol <code>{vol_24h}</code> | ΔVol <code>{vol_chg}%</code>")
-            lines.append(f"📊 RSI 1H <code>{rsi_1h_live}/{rsi_1h_closed}</code> | 4H <code>{rsi_4h_live}</code>")
-            lines.append(f"🗺 Prem: 1H <code>{premium_1h}</code> | 4H <code>{premium_4h}</code>")
-            lines.append(f"⚙️ {factor_summary}")
-            lines.append(f"🔎 Sweep: <code>{sweep_detail}</code>")
-            lines.append(f"🧭 <i>{setup_status}</i>")
+            lines.append(f"{idx + 1}) {signal_label} — <code>{symbol}</code>")
+            lines.append(f"Price {price} | 24h {chg_24h}% | Vol {vol_24h} | ΔVol {vol_chg}%")
+            lines.append(f"RSI 1H {rsi_1h_live} Live /{rsi_1h_closed} Closed | 4H {rsi_4h_live} Live")
+            lines.append(f"Premium 1H: {premium_1h} | 4H: {premium_4h}")
+            lines.append("")
+            lines.append(f"Sweep: {sweep_icon} {sweep_detail}")
+            lines.append(f"Local High: {local_high_icon} {local_high_detail}")
+            lines.append(f"Reason: {reason}")
 
             if idx != len(display_groups) - 1:
                 lines.append("────────────")
@@ -3156,7 +3162,6 @@ def format_multi_provider_telegram(
     lines.append("Planned: ⚪ OI/Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS | ⚪ Div")
 
     return "\n".join(lines)
-
 
 # ============================================================
 # MULTI PROVIDER RUNNER
