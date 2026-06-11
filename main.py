@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r6"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r7"
 
 RSI_PERIOD = 14
 
@@ -1112,7 +1112,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
             df1,
             candidate_index=closed_1h_index,
             timeframe="1H",
-            include_rolling=True,
+            include_rolling=False,
         )
         swept_1h = select_best_confirmed_swept_level(
             candle=closed_1h_candle,
@@ -1157,7 +1157,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
                     df1,
                     candidate_index=candidate_1h_index_for_4h,
                     timeframe="1H",
-                    include_rolling=True,
+                    include_rolling=False,
                 )
                 swept_1h_by_4h = select_best_confirmed_swept_level(
                     candle=closed_4h_candle,
@@ -3148,7 +3148,7 @@ def format_multi_provider_telegram(
             lines.append("")
             lines.append(f"{idx + 1}) {signal_label} — <code>{symbol}</code>")
             lines.append(f"Price {price} | 24h {chg_24h}% | Vol {vol_24h} | ΔVol {vol_chg}%")
-            lines.append(f"RSI 1H {rsi_1h_live} Live /{rsi_1h_closed} Closed | 4H {rsi_4h_live} Live")
+            lines.append(f"RSI 1H Live {rsi_1h_live} | Closed {rsi_1h_closed} | 4H Live {rsi_4h_live}")
             lines.append(f"Premium 1H: {premium_1h} | 4H: {premium_4h}")
             lines.append("")
             lines.append(f"Sweep: {sweep_icon} {sweep_detail}")
