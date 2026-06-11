@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r9"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r11"
 
 RSI_PERIOD = 14
 
@@ -69,11 +69,26 @@ LOCAL_HIGH_LOOKBACKS = {
     "48H": 48,
     "7D": 168,
 }
+
+# Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
+OPEN_LEVEL_NEAR_THRESHOLDS = {
+    "D": 0.0020,   # 0.20% below daily open
+    "W": 0.0035,   # 0.35% below weekly open
+    "M": 0.0035,   # 0.35% below monthly open
+    "Y": 0.0035,   # 0.35% below yearly open
+}
+OPEN_LEVEL_CONTEXT_WEIGHTS = {
+    "D": {"near": 0.50, "tested": 1.00},
+    "W": {"near": 1.00, "tested": 2.00},
+    "M": {"near": 1.00, "tested": 2.00},
+    "Y": {"near": 1.00, "tested": 2.00},
+}
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 TELEGRAM_MAX_SIGNALS = 10
 CANDLE_LIMIT_1H = 500
 CANDLE_LIMIT_4H = 500
+CANDLE_LIMIT_1D = 300
 
 REQUEST_DELAY_SECONDS = 0.15
 
@@ -1438,7 +1453,301 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
     )
 
 
-def analyze_short_factors(df_1h, df_4h=None):
+
+def normalize_daily_candles(df_1d):
+    if df_1d is None or df_1d.empty:
+        return pd.DataFrame()
+
+    if "timestamp" not in df_1d.columns or "open" not in df_1d.columns:
+        return pd.DataFrame()
+
+    df = df_1d.copy().reset_index(drop=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["open"] = pd.to_numeric(df["open"], errors="coerce")
+    df = df.dropna(subset=["timestamp", "open"])
+
+    if df.empty:
+        return df
+
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def get_period_start(timestamp, period_label):
+    ts = pd.to_datetime(timestamp)
+
+    if period_label == "D":
+        return ts.normalize()
+
+    if period_label == "W":
+        return (ts - pd.Timedelta(days=int(ts.weekday()))).normalize()
+
+    if period_label == "M":
+        return ts.replace(day=1).normalize()
+
+    if period_label == "Y":
+        return ts.replace(month=1, day=1).normalize()
+
+    return None
+
+
+def calculate_open_levels(df_1d):
+    """
+    Return D/W/M/Y open levels from 1D candles.
+
+    The latest 1D candle is used as the current day context. W/M/Y opens are
+    taken from the first available 1D candle inside the current week/month/year.
+    If the instrument was listed after the period start, the first available
+    candle inside that period is used.
+    """
+
+    df = normalize_daily_candles(df_1d)
+
+    if df.empty:
+        return {}
+
+    reference_time = df.iloc[-1]["timestamp"]
+    timestamps = pd.to_datetime(df["timestamp"], errors="coerce")
+    levels = {}
+
+    for label in ["D", "W", "M", "Y"]:
+        start = get_period_start(reference_time, label)
+
+        if start is None:
+            continue
+
+        period_df = df[timestamps >= start]
+
+        if period_df.empty:
+            continue
+
+        first_row = period_df.iloc[0]
+        open_price = safe_float(first_row.get("open"), default=np.nan)
+
+        if open_price is None or pd.isna(open_price) or float(open_price) <= 0:
+            continue
+
+        levels[label] = {
+            "label": label,
+            "open": float(open_price),
+            "source_time": first_row.get("timestamp"),
+        }
+
+    return levels
+
+
+def get_previous_candle(df, candle_index):
+    if df is None or df.empty or candle_index is None:
+        return None
+
+    index = int(candle_index)
+
+    if index <= 0 or index >= len(df):
+        return None
+
+    return df.iloc[index - 1]
+
+
+def open_level_tested_from_below(confirm_candle, previous_candle, level_price):
+    if confirm_candle is None or level_price is None:
+        return False
+
+    level_price = float(level_price)
+
+    if level_price <= 0:
+        return False
+
+    candle_high = safe_float(confirm_candle.get("high"), default=np.nan)
+    candle_close = safe_float(confirm_candle.get("close"), default=np.nan)
+    candle_open = safe_float(confirm_candle.get("open"), default=np.nan)
+
+    if pd.isna(candle_high) or pd.isna(candle_close):
+        return False
+
+    took_or_touched_level = float(candle_high) >= level_price
+    closed_back_below = float(candle_close) < level_price
+
+    if not took_or_touched_level or not closed_back_below:
+        return False
+
+    approached_from_below = False
+
+    if not pd.isna(candle_open) and float(candle_open) < level_price:
+        approached_from_below = True
+
+    if previous_candle is not None:
+        previous_close = safe_float(previous_candle.get("close"), default=np.nan)
+
+        if not pd.isna(previous_close) and float(previous_close) < level_price:
+            approached_from_below = True
+
+    return bool(approached_from_below)
+
+
+def open_level_near_from_below(current_price, level_price, threshold_pct):
+    if current_price is None or level_price is None:
+        return False
+
+    current_price = safe_float(current_price, default=np.nan)
+    level_price = safe_float(level_price, default=np.nan)
+
+    if pd.isna(current_price) or pd.isna(level_price) or float(level_price) <= 0:
+        return False
+
+    current_price = float(current_price)
+    level_price = float(level_price)
+
+    if current_price >= level_price:
+        return False
+
+    distance_pct = (level_price - current_price) / level_price
+
+    return 0 <= distance_pct <= float(threshold_pct)
+
+
+def evaluate_open_level_context(label, level_price, current_price, confirm_candle, previous_candle):
+    threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
+    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
+
+    if open_level_tested_from_below(confirm_candle, previous_candle, level_price):
+        return {
+            "label": label,
+            "state": "tested",
+            "weight": float(weights.get("tested", 0.0)),
+            "open": float(level_price),
+        }
+
+    if open_level_near_from_below(current_price, level_price, threshold):
+        return {
+            "label": label,
+            "state": "near",
+            "weight": float(weights.get("near", 0.0)),
+            "open": float(level_price),
+        }
+
+    return None
+
+
+def build_open_levels_detail(events):
+    if not events:
+        return ""
+
+    order = {"D": 0, "W": 1, "M": 2, "Y": 3}
+    tested = sorted([event["label"] for event in events if event.get("state") == "tested"], key=lambda x: order.get(x, 99))
+    near = sorted([event["label"] for event in events if event.get("state") == "near"], key=lambda x: order.get(x, 99))
+
+    parts = []
+
+    if tested:
+        parts.append(f"{'/'.join(tested)} open tested, close below")
+
+    if near:
+        parts.append(f"near {'/'.join(near)} open resistance")
+
+    return " | ".join(parts)
+
+
+def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price=None):
+    """
+    D/W/M/Y open-level resistance context for short-watch setups.
+
+    This factor is a location/context amplifier in r11:
+    - it does not act as a trigger by itself;
+    - it can strengthen signal_level when a confirmed liquidity sweep exists;
+    - Telegram shows it only when there is relevant open-level resistance.
+
+    States:
+    - near from below: price is below the open and very close to it;
+    - tested + close below: candle touched/pierced the open and closed back below.
+
+    D open uses 1H confirmation for tested state.
+    W/M/Y opens use 4H confirmation for tested state.
+    """
+
+    levels = calculate_open_levels(df_1d)
+
+    if not levels:
+        return make_factor(
+            key="open_levels",
+            label="Open levels",
+            status="not_enough_data",
+            points=0,
+            detail="1D candles unavailable",
+        )
+
+    if current_price is None and df_1h is not None and not df_1h.empty:
+        live_1h_candle, _ = get_live_candle_for_analysis(df_1h)
+
+        if live_1h_candle is not None:
+            current_price = safe_float(live_1h_candle.get("close"), default=np.nan)
+
+    df1 = None if df_1h is None or df_1h.empty else df_1h.copy().reset_index(drop=True)
+    df4 = None if df_4h is None or df_4h.empty else df_4h.copy().reset_index(drop=True)
+
+    closed_1h_candle, closed_1h_index = get_last_closed_candle_for_analysis(df1) if df1 is not None else (None, None)
+    previous_1h_candle = get_previous_candle(df1, closed_1h_index) if df1 is not None else None
+
+    closed_4h_candle, closed_4h_index = get_last_closed_candle_for_analysis(df4) if df4 is not None else (None, None)
+    previous_4h_candle = get_previous_candle(df4, closed_4h_index) if df4 is not None else None
+
+    events = []
+
+    for label in ["D", "W", "M", "Y"]:
+        level = levels.get(label)
+
+        if not level:
+            continue
+
+        level_price = level.get("open")
+
+        if label == "D":
+            event = evaluate_open_level_context(
+                label=label,
+                level_price=level_price,
+                current_price=current_price,
+                confirm_candle=closed_1h_candle,
+                previous_candle=previous_1h_candle,
+            )
+        else:
+            event = evaluate_open_level_context(
+                label=label,
+                level_price=level_price,
+                current_price=current_price,
+                confirm_candle=closed_4h_candle,
+                previous_candle=previous_4h_candle,
+            )
+
+        if event is not None:
+            events.append(event)
+
+    if not events:
+        factor = make_factor(
+            key="open_levels",
+            label="Open levels",
+            status="not_confirmed",
+            points=0,
+            detail="no open-level resistance nearby",
+        )
+        factor["open_context_score"] = 0.0
+        factor["events"] = []
+        return factor
+
+    detail = build_open_levels_detail(events)
+    context_score = sum(float(event.get("weight", 0.0)) for event in events)
+
+    factor = make_factor(
+        key="open_levels",
+        label="Open levels",
+        status="confirmed",
+        points=0,
+        detail=detail,
+    )
+    factor["open_context_score"] = float(context_score)
+    factor["events"] = events
+
+    return factor
+
+
+def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
     """
     Current short-watch factor set.
 
@@ -1446,15 +1755,23 @@ def analyze_short_factors(df_1h, df_4h=None):
     - Liquidity sweep: trigger factor.
     - Premium zone: location factor.
     - Local high update: extension/location context.
+    - Open levels: D/W/M/Y resistance context; not a trigger, but can amplify location.
 
     """
 
     premium_factor = detect_premium_zone(df_1h, df_4h)
+    open_levels_factor = detect_open_levels_context(
+        df_1h=df_1h,
+        df_4h=df_4h,
+        df_1d=df_1d,
+        current_price=current_price,
+    )
 
     factors = [
         detect_liquidity_sweep(df_1h, df_4h=df_4h),
         premium_factor,
         detect_local_high_update(df_1h),
+        open_levels_factor,
     ]
 
     score = sum(int(factor.get("points", 0)) for factor in factors)
@@ -1584,22 +1901,58 @@ def calculate_location_trigger_context(short_factors):
     """
     Split short analysis into location context and trigger confirmation.
 
-    Location context:
-    - Premium zone
-    - Local high update
+    Location/context:
+    - Premium zone.
+    - Local high update.
+    - Open Levels D/W/M/Y resistance context.
 
     Trigger / confirmation:
-    - Confirmed liquidity sweep only
+    - Confirmed liquidity sweep only.
+
+    Open Levels are not triggers. They amplify location/context and can strengthen
+    signal_level only when a confirmed liquidity sweep exists.
     """
 
     premium = get_short_factor(short_factors, "premium_zone") or {}
     local_high = get_short_factor(short_factors, "local_high_update") or {}
+    open_levels = get_short_factor(short_factors, "open_levels") or {}
 
     liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
     liquidity_candidate = liquidity.get("status") == "candidate"
 
-    location_score = int(premium.get("points", 0)) + int(local_high.get("points", 0))
+    premium_points = float(safe_float(premium.get("points", 0), default=0.0))
+    local_high_points = float(safe_float(local_high.get("points", 0), default=0.0))
+    open_context_score = float(safe_float(open_levels.get("open_context_score", 0.0), default=0.0))
+
+    open_events = open_levels.get("events", []) if isinstance(open_levels, dict) else []
+    if not isinstance(open_events, list):
+        open_events = []
+
+    htf_open_context_score = sum(
+        float(safe_float(event.get("weight", 0.0), default=0.0))
+        for event in open_events
+        if isinstance(event, dict) and event.get("label") in ("W", "M", "Y")
+    )
+    d_open_context_score = sum(
+        float(safe_float(event.get("weight", 0.0), default=0.0))
+        for event in open_events
+        if isinstance(event, dict) and event.get("label") == "D"
+    )
+
+    tested_open_labels = [
+        str(event.get("label"))
+        for event in open_events
+        if isinstance(event, dict) and event.get("state") == "tested"
+    ]
+    near_open_labels = [
+        str(event.get("label"))
+        for event in open_events
+        if isinstance(event, dict) and event.get("state") == "near"
+    ]
+
+    base_location_score = premium_points + local_high_points
+    location_score = base_location_score + open_context_score
     trigger_count = int(liquidity_confirmed)
     early_trigger_count = int(liquidity_candidate)
 
@@ -1609,7 +1962,16 @@ def calculate_location_trigger_context(short_factors):
         trigger_parts.append("liquidity sweep")
 
     return {
-        "location_score": location_score,
+        "location_score": float(location_score),
+        "base_location_score": float(base_location_score),
+        "open_context_score": float(open_context_score),
+        "htf_open_context_score": float(htf_open_context_score),
+        "d_open_context_score": float(d_open_context_score),
+        "tested_open_labels": tested_open_labels,
+        "near_open_labels": near_open_labels,
+        "has_open_resistance": bool(open_context_score > 0),
+        "has_htf_open_resistance": bool(htf_open_context_score > 0),
+        "has_strong_open_resistance": bool(htf_open_context_score >= 2.0 or open_context_score >= 2.0),
         "trigger_count": trigger_count,
         "early_trigger_count": early_trigger_count,
         "liquidity_confirmed": liquidity_confirmed,
@@ -1618,7 +1980,7 @@ def calculate_location_trigger_context(short_factors):
     }
 
 def quality_location_label(score):
-    score = int(score or 0)
+    score = float(safe_float(score, default=0.0))
 
     if score >= 5:
         return "Extreme"
@@ -1627,8 +1989,6 @@ def quality_location_label(score):
     if score >= 1:
         return "Moderate"
     return "None"
-
-
 
 def quality_trigger_label_from_context(context):
     liquidity_confirmed = bool(context.get("liquidity_confirmed"))
@@ -1642,20 +2002,32 @@ def quality_trigger_label_from_context(context):
 def build_setup_status(signal_level, scores, short_factors):
     rsi_score = int(scores.get("rsi_score", 0))
     context = calculate_location_trigger_context(short_factors)
-    location_score = int(context.get("location_score", 0))
+    location_score = float(context.get("location_score", 0.0))
     trigger_count = int(context.get("trigger_count", 0))
     has_overheat_context = bool(scores.get("has_overheat_context", False))
+    has_open_resistance = bool(context.get("has_open_resistance", False))
+    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
+        if has_htf_open_resistance:
+            return "High priority watch — confirmed liquidity sweep + HTF open resistance"
+        if has_open_resistance:
+            return "High priority watch — confirmed liquidity sweep + open resistance"
         return "High priority watch — strong heat, premium/location, and confirmed liquidity sweep are aligned"
 
     if signal_level == "SHORT_WATCH":
         if trigger_count >= 1:
+            if has_htf_open_resistance:
+                return "Short watch — confirmed liquidity sweep + HTF open resistance"
+            if has_open_resistance:
+                return "Short watch — confirmed liquidity sweep + open resistance"
             return "Short watch — confirmed liquidity sweep detected"
         return "Short watch — waiting for confirmed liquidity sweep"
 
     if signal_level == "OVERHEAT_WATCH":
         if location_score > 0:
+            if has_open_resistance:
+                return "Overheat watch — RSI heat confirmed near open resistance; waiting for confirmed liquidity sweep"
             return "Overheat watch — RSI heat confirmed; waiting for confirmed liquidity sweep"
         return "Overheat watch — RSI heat confirmed; waiting for premium/location and confirmed sweep"
 
@@ -1684,13 +2056,23 @@ def build_watch_reason(signal_level, scores, short_factors):
     context = calculate_location_trigger_context(short_factors)
     location_quality = quality_location_label(context.get("location_score", 0))
     trigger_quality = quality_trigger_label_from_context(context)
+    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
+    has_open_resistance = bool(context.get("has_open_resistance", False))
     setup_status = build_setup_status(signal_level, scores, short_factors)
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed 1H trigger"
+        if has_htf_open_resistance:
+            return f"{pump_quality} pump + {heat_quality} RSI heat + confirmed liquidity sweep + HTF open resistance"
+        if has_open_resistance:
+            return f"{pump_quality} pump + {heat_quality} RSI heat + confirmed liquidity sweep + open resistance"
+        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed liquidity sweep"
 
     if signal_level == "SHORT_WATCH":
         pump_part = "overheat" if scores.get("has_overheat_context") else f"{pump_quality} pump"
+        if has_htf_open_resistance:
+            return f"{pump_part} + {trigger_quality} + HTF open resistance. RSI heat: {heat_quality}"
+        if has_open_resistance:
+            return f"{pump_part} + {trigger_quality} + open resistance. RSI heat: {heat_quality}"
         return f"{pump_part} + {location_quality} location + {trigger_quality}. RSI heat: {heat_quality}"
 
     if signal_level == "OVERHEAT_WATCH":
@@ -1702,13 +2084,15 @@ def build_watch_reason(signal_level, scores, short_factors):
         if location_quality != "None":
             base_parts.append(f"{location_quality} location")
 
+        if has_open_resistance:
+            base_parts.append("open resistance")
+
         if trigger_quality != "None":
             base_parts.append(trigger_quality)
 
         return " + ".join(base_parts) + ", but " + setup_status.replace("Watch only — ", "")
 
     return "Watch filters not passed"
-
 
 def classify_watch_signal(scores, short_factors=None):
     """
@@ -1717,8 +2101,9 @@ def classify_watch_signal(scores, short_factors=None):
     A watchlist candidate must be one of:
     - pump context with incomplete but relevant location/heat/trigger context;
     - overheat context based on strict RSI + 24h change + 24h volume thresholds;
-    - short-watch context with location and at least one confirmed 1H trigger.
+    - short-watch context with location and a confirmed liquidity sweep.
 
+    Open Levels amplify location/context but do not act as standalone triggers.
     The function does not produce execution signals.
     """
 
@@ -1728,9 +2113,12 @@ def classify_watch_signal(scores, short_factors=None):
     rsi_score = int(scores.get("rsi_score", 0))
 
     context = calculate_location_trigger_context(short_factors)
-    location_score = int(context.get("location_score", 0))
+    location_score = float(context.get("location_score", 0.0))
     trigger_count = int(context.get("trigger_count", 0))
     liquidity_candidate = bool(context.get("liquidity_candidate"))
+    open_context_score = float(context.get("open_context_score", 0.0))
+    htf_open_context_score = float(context.get("htf_open_context_score", 0.0))
+    has_strong_open_resistance = bool(context.get("has_strong_open_resistance", False))
 
     premium_factor = get_short_factor(short_factors, "premium_zone") or {}
     premium_points = int(premium_factor.get("points", 0))
@@ -1744,8 +2132,8 @@ def classify_watch_signal(scores, short_factors=None):
     has_strong_heat = rsi_score >= 3 or has_overheat_context
 
     has_location = location_score >= 2
-    has_strong_location = location_score >= 3 or premium_points >= 2
-    has_premium_context = premium_points >= 1
+    has_strong_location = location_score >= 3 or premium_points >= 2 or has_strong_open_resistance
+    has_premium_or_open_context = premium_points >= 1 or open_context_score >= 1.0
 
     has_trigger = trigger_count >= 1
 
@@ -1754,7 +2142,7 @@ def classify_watch_signal(scores, short_factors=None):
     if (
         (has_extreme_pump or has_strong_pump)
         and has_strong_heat
-        and has_premium_context
+        and has_premium_or_open_context
         and has_strong_location
         and has_trigger
     ):
@@ -1771,11 +2159,12 @@ def classify_watch_signal(scores, short_factors=None):
     return {
         "signal_level": signal_level,
         "reason": build_watch_reason(signal_level, scores, short_factors),
-        "location_score": int(location_score),
+        "location_score": float(location_score),
+        "open_context_score": float(open_context_score),
+        "htf_open_context_score": float(htf_open_context_score),
         "trigger_count": int(trigger_count),
         "setup_status": build_setup_status(signal_level, scores, short_factors),
     }
-
 
 def classify_signal(
     rsi_1h_live,
@@ -2063,6 +2452,9 @@ def okx_analyze_candidate(inst_id, ticker_row):
     df_4h = okx_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
+    raw_1d = okx_get_candles(inst_id=inst_id, bar="1D", limit=CANDLE_LIMIT_1D)
+    df_1d = okx_candles_to_dataframe(raw_1d)
+
     last_1h_live = okx_get_last_live_candle(df_1h)
     last_1h_closed = okx_get_last_closed_candle(df_1h)
     last_4h_live = okx_get_last_live_candle(df_4h)
@@ -2076,7 +2468,7 @@ def okx_analyze_candidate(inst_id, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    short_analysis = analyze_short_factors(df_1h, df_4h)
+    short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -2426,6 +2818,9 @@ def bitget_analyze_candidate(symbol, ticker_row):
     df_4h = bitget_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
+    raw_1d = bitget_get_candles(symbol=symbol, granularity="1D", limit=CANDLE_LIMIT_1D)
+    df_1d = bitget_candles_to_dataframe(raw_1d)
+
     last_1h_live = bitget_get_last_live_candle(df_1h)
     last_1h_closed = bitget_get_last_closed_candle(df_1h)
     last_4h_live = bitget_get_last_live_candle(df_4h)
@@ -2439,7 +2834,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    short_analysis = analyze_short_factors(df_1h, df_4h)
+    short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -2730,7 +3125,7 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
                 "volume_score": int(row.get("volume_score", 0)),
                 "short_setup_score": int(row.get("short_setup_score", 0)),
                 "final_score": int(row.get("final_score", 0)),
-                "location_score": int(row.get("location_score", 0)),
+                "location_score": float(safe_float(row.get("location_score", 0), default=0.0)),
                 "trigger_count": int(row.get("trigger_count", 0)),
                 "setup_status": str(row.get("setup_status", "N/A")),
                 "short_factors": row.get("short_factors", []),
@@ -3042,6 +3437,17 @@ def format_sweep_detail_for_telegram(factors):
     return "No confirmed sweep"
 
 
+def format_open_levels_detail_for_telegram(factors):
+    factor = find_factor(factors, "open_levels") or {}
+    status = factor.get("status")
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if status == "confirmed" and detail:
+        return detail
+
+    return ""
+
+
 def format_local_high_detail_for_telegram(factors):
     factor = find_factor(factors, "local_high_update") or {}
     status = factor.get("status")
@@ -3289,6 +3695,11 @@ def format_multi_provider_telegram(
             lines.append(f"Price {price} | 24h {chg_24h}% | Vol {vol_24h} | ΔVol {vol_chg}%")
             lines.append(f"RSI 1H Live {rsi_1h_live} | Closed {rsi_1h_closed} | 4H Live {rsi_4h_live}")
             lines.append(f"Premium 1H: {premium_1h} | 4H: {premium_4h}")
+
+            open_levels_detail = html.escape(format_open_levels_detail_for_telegram(short_factors))
+            if open_levels_detail:
+                lines.append(f"Open Levels: {open_levels_detail}")
+
             lines.append("")
             lines.append(f"Sweep: {sweep_icon} {sweep_detail}")
             lines.append(f"Local High: {local_high_icon} {local_high_detail}")
@@ -3518,6 +3929,272 @@ def make_rolling_only_high_take_case():
     return make_synthetic_ohlcv(rows, freq="1h")
 
 
+
+def make_open_levels_1d_case():
+    dates = pd.to_datetime([
+        "2026-01-01 00:00:00",
+        "2026-06-08 00:00:00",
+        "2026-06-09 00:00:00",
+        "2026-06-10 00:00:00",
+        "2026-06-11 00:00:00",
+    ])
+
+    return pd.DataFrame({
+        "timestamp": dates,
+        "open": [80.0, 100.0, 98.0, 97.0, 94.0],
+        "high": [82.0, 101.0, 99.0, 98.0, 95.0],
+        "low": [79.0, 95.0, 96.0, 95.0, 93.5],
+        "close": [81.0, 98.0, 97.0, 96.0, 94.5],
+    })
+
+
+def make_open_levels_1h_confirm_case():
+    timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [95.0, 95.5, 95.7, 95.8, 95.9, 95.7, 95.6, 95.5],
+        "high": [95.8, 96.0, 96.1, 96.0, 96.2, 96.0, 96.0, 96.0],
+        "low": [94.9, 95.2, 95.4, 95.5, 95.4, 95.3, 95.2, 95.2],
+        "close": [95.4, 95.7, 95.8, 95.9, 95.7, 95.6, 95.5, 95.4],
+    })
+    return df
+
+
+def make_open_levels_4h_test_case():
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [94.0, 95.0, 96.0, 97.0, 98.0, 99.0, 99.4, 99.2],
+        "high": [95.0, 96.0, 97.0, 98.0, 99.0, 100.2, 100.5, 99.5],
+        "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.4, 98.8, 98.7],
+        "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.4, 99.5, 99.0],
+    })
+    return df
+
+
+def make_open_levels_4h_near_case():
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [94.0, 95.0, 96.0, 97.0, 98.0, 99.0, 99.2, 99.4],
+        "high": [95.0, 96.0, 97.0, 98.0, 99.0, 99.4, 99.6, 99.7],
+        "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.7, 98.9, 99.1],
+        "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.1, 99.3, 99.5],
+    })
+    return df
+
+
+def run_open_levels_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING OPEN LEVELS SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    df_1d = make_open_levels_1d_case()
+
+    tests = []
+
+    tests.append((
+        "W/M open tested by 4H close below",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_confirm_case(),
+            df_4h=make_open_levels_4h_test_case(),
+            df_1d=df_1d,
+            current_price=99.4,
+        ),
+        "confirmed",
+        "W/M open tested, close below",
+    ))
+
+    tests.append((
+        "W/M open near from below",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_confirm_case(),
+            df_4h=make_open_levels_4h_near_case(),
+            df_1d=df_1d,
+            current_price=99.7,
+        ),
+        "confirmed",
+        "near W/M open resistance",
+    ))
+
+    tests.append((
+        "No open resistance nearby",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_confirm_case(),
+            df_4h=make_open_levels_4h_near_case(),
+            df_1d=df_1d,
+            current_price=97.0,
+        ),
+        "not_confirmed",
+        "no open-level resistance nearby",
+    ))
+
+    failed = 0
+
+    for name, result, expected_status, expected_detail in tests:
+        actual_status = str(result.get("status"))
+        detail = str(result.get("detail", ""))
+        ok = actual_status == expected_status and expected_detail in detail
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"Open levels self-tests failed: {failed}/{len(tests)}")
+
+    print(f"OPEN LEVELS SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
+def make_classification_open_factor(labels, states):
+    events = []
+
+    for label, state in zip(labels, states):
+        weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
+        events.append({
+            "label": label,
+            "state": state,
+            "weight": float(weights.get(state, 0.0)),
+            "open": 100.0,
+        })
+
+    factor = make_factor(
+        key="open_levels",
+        label="Open levels",
+        status="confirmed" if events else "not_confirmed",
+        points=0,
+        detail=build_open_levels_detail(events),
+    )
+    factor["open_context_score"] = float(sum(event["weight"] for event in events))
+    factor["events"] = events
+    return factor
+
+
+def make_classification_sweep_factor():
+    return make_factor(
+        key="liquidity_sweep",
+        label="Liquidity sweep",
+        status="confirmed",
+        points=2,
+        detail="Swept 1H equal highs x2 100.00, close below",
+    )
+
+
+def make_classification_premium_factor(points=0):
+    factor = make_factor(
+        key="premium_zone",
+        label="Premium zone",
+        status="confirmed" if points > 0 else "not_confirmed",
+        points=points,
+        detail="1H: Neutral | 4H: Neutral",
+    )
+    factor["premium_1h_label"] = "Neutral"
+    factor["premium_1h_position"] = 0.50
+    factor["premium_4h_label"] = "Neutral"
+    factor["premium_4h_position"] = 0.50
+    return factor
+
+
+def make_classification_local_high_factor(points=0):
+    return make_factor(
+        key="local_high_update",
+        label="Local high update",
+        status="confirmed" if points > 0 else "not_confirmed",
+        points=points,
+        detail="1H: no 24H/48H/7D high update",
+    )
+
+
+def run_open_levels_classification_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING OPEN LEVELS CLASSIFICATION SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    base_scores = {
+        "pump_score": 2,
+        "rsi_score": 0,
+        "volume_score": 1,
+        "short_setup_score": 2,
+        "final_score": 5,
+        "volume_ok": True,
+        "has_basic_pump_context": True,
+        "has_strong_pump_context": True,
+        "has_extreme_pump_context": False,
+        "has_overheat_context": False,
+        "overheat_reason": "N/A",
+    }
+
+    strong_heat_scores = dict(base_scores)
+    strong_heat_scores["rsi_score"] = 3
+    strong_heat_scores["final_score"] = 8
+
+    tests = [
+        (
+            "W open tested + sweep can provide location and create SHORT WATCH",
+            base_scores,
+            [
+                make_classification_sweep_factor(),
+                make_classification_premium_factor(points=0),
+                make_classification_local_high_factor(points=0),
+                make_classification_open_factor(["W"], ["tested"]),
+            ],
+            "SHORT_WATCH",
+        ),
+        (
+            "W open tested without sweep cannot create SHORT WATCH",
+            base_scores,
+            [
+                make_classification_premium_factor(points=0),
+                make_classification_local_high_factor(points=0),
+                make_classification_open_factor(["W"], ["tested"]),
+            ],
+            "NO_SIGNAL",
+        ),
+        (
+            "Strong heat + sweep + W tested can upgrade to HIGH PRIORITY",
+            strong_heat_scores,
+            [
+                make_classification_sweep_factor(),
+                make_classification_premium_factor(points=0),
+                make_classification_local_high_factor(points=0),
+                make_classification_open_factor(["W"], ["tested"]),
+            ],
+            "HIGH_PRIORITY_SHORT_WATCH",
+        ),
+        (
+            "D near alone is minor and does not provide enough location",
+            base_scores,
+            [
+                make_classification_sweep_factor(),
+                make_classification_premium_factor(points=0),
+                make_classification_local_high_factor(points=0),
+                make_classification_open_factor(["D"], ["near"]),
+            ],
+            "NO_SIGNAL",
+        ),
+    ]
+
+    failed = 0
+
+    for name, scores, factors, expected_signal in tests:
+        result = classify_watch_signal(scores, short_factors=factors)
+        actual_signal = str(result.get("signal_level"))
+        ok = actual_signal == expected_signal
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected_signal} actual={actual_signal} | location={result.get('location_score')} open={result.get('open_context_score')}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"Open levels classification self-tests failed: {failed}/{len(tests)}")
+
+    print(f"OPEN LEVELS CLASSIFICATION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def run_sweep_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING SWEEP SELF TESTS")
@@ -3592,6 +4269,8 @@ def run_sweep_self_tests():
 def main():
     if "--self-test" in sys.argv:
         run_sweep_self_tests()
+        run_open_levels_self_tests()
+        run_open_levels_classification_self_tests()
         return
 
     get_telegram_credentials()
