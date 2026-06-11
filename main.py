@@ -17,7 +17,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r7"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r8"
 
 RSI_PERIOD = 14
 
@@ -52,7 +52,7 @@ LIQUIDITY_SWEEP_LOOKBACKS = {
 LIQUIDITY_SWEEP_MIN_BREAK_PCT = 0.001      # 0.10% above previous high
 LIQUIDITY_SWEEP_MIN_CLOSE_BACK_PCT = 0.0005 # 0.05% close back below previous high
 LIQUIDITY_SWEEP_LIVE_INVALIDATION_PCT = 0.0005 # current/live candle reclaimed level
-LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 # swept high must be at least 5 hours old
+LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 # swept high must be at least 5 bars old on its own timeframe
 LIQUIDITY_SWEEP_MIN_REACTION_PCT = 0.015 # price must have reacted at least 1.5% from the level before sweep
 LIQUIDITY_SWEEP_EQUAL_HIGH_TOLERANCE_PCT = 0.0025 # highs within 0.25% are treated as equal-high liquidity
 LIQUIDITY_SWEEP_MIN_UPPER_WICK_RANGE_PCT = 0.30 # sweep candle should show rejection/failure character
@@ -437,6 +437,24 @@ def calculate_level_age_hours(candidate_index, level_index, timeframe="1H", cand
     return float(max(0, int(candidate_index) - int(level_index)) * get_timeframe_hours(timeframe))
 
 
+def calculate_level_age_bars(candidate_index, level_index):
+    """
+    Return level age in bars of the level's own timeframe.
+
+    This is intentionally not converted to hours. A 4H level with
+    LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS = 5 must be at least five
+    completed 4H bars old, not merely five hours old.
+    """
+
+    if candidate_index is None or level_index is None:
+        return 0
+
+    try:
+        return max(0, int(candidate_index) - int(level_index))
+    except Exception:
+        return 0
+
+
 def calculate_reaction_pct_after_level(df, level_index, candidate_index, level_price):
     """
     Measure whether price actually moved away from the level before the sweep.
@@ -493,6 +511,10 @@ def make_liquidity_level(
         candidate_time=candidate_time,
         level_time=level_time,
     )
+    age_bars = calculate_level_age_bars(
+        candidate_index=candidate_index,
+        level_index=source_index,
+    )
 
     return {
         "price": float(price),
@@ -500,6 +522,7 @@ def make_liquidity_level(
         "timeframe": str(timeframe),
         "source_index": int(source_index),
         "source_time": None if level_time is None else pd.to_datetime(level_time),
+        "age_bars": int(age_bars),
         "age_hours": 0.0 if age_hours is None else float(age_hours),
         "touches": int(touches),
         "quality": int(quality),
@@ -511,7 +534,7 @@ def liquidity_level_is_valid(level):
     if not level:
         return False
 
-    if float(level.get("age_hours", 0.0)) < float(LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS):
+    if int(level.get("age_bars", 0)) < int(LIQUIDITY_SWEEP_MIN_LEVEL_AGE_BARS):
         return False
 
     if float(level.get("reaction_pct", 0.0)) < float(LIQUIDITY_SWEEP_MIN_REACTION_PCT):
@@ -635,9 +658,12 @@ def collect_equal_high_levels_from_swings(swing_levels, timeframe="1H"):
 
         price = max(float(item["price"]) for item in members)
         oldest_member = min(members, key=lambda item: int(item.get("source_index", 0)))
+        newest_member = max(members, key=lambda item: int(item.get("source_index", 0)))
         source_index = int(oldest_member["source_index"])
         source_time = oldest_member.get("source_time")
-        age_hours = max(float(item.get("age_hours", 0.0)) for item in members)
+        # Equal-high liquidity is considered mature only after the latest touch is also old enough.
+        age_bars = min(int(item.get("age_bars", 0)) for item in members)
+        age_hours = min(float(item.get("age_hours", 0.0)) for item in members)
         reaction_pct = max(float(item.get("reaction_pct", 0.0)) for item in members)
         quality = 5 if timeframe == "4H" else 4
 
@@ -647,6 +673,8 @@ def collect_equal_high_levels_from_swings(swing_levels, timeframe="1H"):
             "timeframe": str(timeframe),
             "source_index": int(source_index),
             "source_time": None if source_time is None else pd.to_datetime(source_time),
+            "newest_source_index": int(newest_member.get("source_index", source_index)),
+            "age_bars": int(age_bars),
             "age_hours": float(age_hours),
             "touches": int(len(members)),
             "quality": int(quality),
@@ -1006,7 +1034,7 @@ def select_best_confirmed_swept_level(candle, levels, confirm_tf, df_context, ca
         key=lambda item: (
             int(item.get("quality", 0)),
             int(item.get("touches", 1)),
-            float(item.get("age_hours", 0.0)),
+            int(item.get("age_bars", 0)),
             float(item.get("price", 0.0)),
         ),
         reverse=True,
@@ -1185,7 +1213,7 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
             get_timeframe_hours(item[1]),
             int(item[0].get("quality", 0)),
             int(item[0].get("touches", 1)),
-            float(item[0].get("age_hours", 0.0)),
+            int(item[0].get("age_bars", 0)),
             float(item[0].get("price", 0.0)),
         ),
         reverse=True,
@@ -3051,6 +3079,10 @@ def format_reason_for_telegram(setup_status):
 
     if text == "confirmed liquidity sweep detected":
         return "confirmed liquidity sweep"
+
+    # Preserve common uppercase acronyms in user-facing reasons.
+    if text.startswith(("RSI", "HTF", "MSS", "OI")):
+        return text
 
     return text[:1].lower() + text[1:] if text else "N/A"
 
