@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r15"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r16"
 
 RSI_PERIOD = 14
 
@@ -87,10 +87,10 @@ OPEN_LEVEL_NEAR_THRESHOLDS = {
     "Y": 0.0035,   # 0.35% below yearly open
 }
 OPEN_LEVEL_CONTEXT_WEIGHTS = {
-    "D": {"near": 0.50, "tested": 1.00},
-    "W": {"near": 1.00, "tested": 2.00},
-    "M": {"near": 1.00, "tested": 2.00},
-    "Y": {"near": 1.00, "tested": 2.00},
+    "D": {"near": 0.50, "live_test": 0.75, "tested": 1.00},
+    "W": {"near": 1.00, "live_test": 1.50, "tested": 2.00},
+    "M": {"near": 1.00, "live_test": 1.50, "tested": 2.00},
+    "Y": {"near": 1.00, "live_test": 1.50, "tested": 2.00},
 }
 # Open-level tests should be aligned with the recent setup window, not only the latest closed candle.
 OPEN_LEVEL_RECENT_WINDOW_1H_BARS = 6
@@ -1702,6 +1702,87 @@ def open_level_near_from_below(current_price, level_price, threshold_pct):
     return 0 <= distance_pct <= float(threshold_pct)
 
 
+def open_level_live_test_from_below(live_candle, level_price):
+    """
+    Live open-level interaction.
+
+    This is not a confirmed rejection. It is context only: the current live
+    candle has already touched/pierced the D/W/M/Y open from below, while the
+    latest live price remains below the level.
+    """
+
+    if live_candle is None or level_price is None:
+        return False
+
+    level_price = safe_float(level_price, default=np.nan)
+    candle_open = safe_float(live_candle.get("open"), default=np.nan)
+    candle_high = safe_float(live_candle.get("high"), default=np.nan)
+    candle_low = safe_float(live_candle.get("low"), default=np.nan)
+    candle_close = safe_float(live_candle.get("close"), default=np.nan)
+
+    if any(pd.isna(value) for value in [level_price, candle_high, candle_close]):
+        return False
+
+    level_price = float(level_price)
+    candle_high = float(candle_high)
+    candle_close = float(candle_close)
+
+    if level_price <= 0:
+        return False
+
+    touched_or_pierced = candle_high >= level_price
+    price_back_below = candle_close < level_price
+
+    if not touched_or_pierced or not price_back_below:
+        return False
+
+    approached_from_below = False
+
+    if not pd.isna(candle_open) and float(candle_open) < level_price:
+        approached_from_below = True
+
+    if not pd.isna(candle_low) and float(candle_low) < level_price:
+        approached_from_below = True
+
+    return bool(approached_from_below)
+
+
+def open_level_live_near_from_below(live_candle, level_price, threshold_pct):
+    """
+    Live candle approached an open level from below without touching it.
+
+    This catches the common case where price stops just below an important
+    open level and starts rotating lower before an actual touch.
+    """
+
+    if live_candle is None or level_price is None:
+        return False
+
+    level_price = safe_float(level_price, default=np.nan)
+    candle_high = safe_float(live_candle.get("high"), default=np.nan)
+    candle_close = safe_float(live_candle.get("close"), default=np.nan)
+    candle_open = safe_float(live_candle.get("open"), default=np.nan)
+
+    if any(pd.isna(value) for value in [level_price, candle_high, candle_close]):
+        return False
+
+    level_price = float(level_price)
+    candle_high = float(candle_high)
+    candle_close = float(candle_close)
+
+    if level_price <= 0:
+        return False
+
+    if candle_high >= level_price or candle_close >= level_price:
+        return False
+
+    if not pd.isna(candle_open) and float(candle_open) >= level_price:
+        return False
+
+    distance_pct = (level_price - candle_high) / level_price
+    return bool(0 <= distance_pct <= float(threshold_pct))
+
+
 def build_open_test_event(label, level_price, confirm_candle, confirm_index, window_tf, window_bars):
     weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
     event = {
@@ -1723,6 +1804,28 @@ def build_open_test_event(label, level_price, confirm_candle, confirm_index, win
     return event
 
 
+def build_open_live_event(label, state, level_price, live_candle, live_index, window_tf, window_bars):
+    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "live_test": 0.0, "tested": 0.0})
+    event = {
+        "label": label,
+        "state": str(state),
+        "weight": float(weights.get(str(state), weights.get("near", 0.0))),
+        "open": float(level_price),
+        "confirm_tf": str(window_tf),
+        "window_bars": int(window_bars),
+        "confirm_index": None if live_index is None else int(live_index),
+        "is_live": True,
+    }
+
+    if live_candle is not None:
+        event["confirm_high"] = safe_float(live_candle.get("high"), default=np.nan)
+        event["confirm_close"] = safe_float(live_candle.get("close"), default=np.nan)
+        if "timestamp" in live_candle:
+            event["confirm_time"] = str(live_candle.get("timestamp"))
+
+    return event
+
+
 def evaluate_open_level_context_over_window(
     label,
     level_price,
@@ -1731,17 +1834,24 @@ def evaluate_open_level_context_over_window(
     df_for_previous,
     window_tf,
     window_bars,
+    live_candle=None,
+    live_index=None,
 ):
     """
     Evaluate open-level resistance over a recent setup window.
 
-    The first priority is a confirmed test: a recent closed candle touched/pierced
-    the open level from below and closed back below it. If no tested event is
-    found, the function falls back to near-from-below live context.
+    Priority:
+    1. confirmed test: recent closed candle touched/pierced the open from below
+       and closed back below;
+    2. live test: current live candle touched/pierced the open from below while
+       the latest price is still below the level;
+    3. near from below: live/current price action is very close below the open.
+
+    Live states are context only and never counted as confirmed rejection.
     """
 
     threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
-    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
+    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "live_test": 0.0, "tested": 0.0})
 
     tested_candidates = []
 
@@ -1760,6 +1870,28 @@ def evaluate_open_level_context_over_window(
     if tested_candidates:
         # Prefer the most recent confirmed test in the setup window.
         return tested_candidates[-1]
+
+    if open_level_live_test_from_below(live_candle, level_price):
+        return build_open_live_event(
+            label=label,
+            state="live_test",
+            level_price=level_price,
+            live_candle=live_candle,
+            live_index=live_index,
+            window_tf=window_tf,
+            window_bars=window_bars,
+        )
+
+    if open_level_live_near_from_below(live_candle, level_price, threshold):
+        return build_open_live_event(
+            label=label,
+            state="near",
+            level_price=level_price,
+            live_candle=live_candle,
+            live_index=live_index,
+            window_tf=window_tf,
+            window_bars=window_bars,
+        )
 
     if open_level_near_from_below(current_price, level_price, threshold):
         return {
@@ -1804,12 +1936,16 @@ def build_open_levels_detail(events):
 
     order = {"D": 0, "W": 1, "M": 2, "Y": 3}
     tested = sorted([event["label"] for event in events if event.get("state") == "tested"], key=lambda x: order.get(x, 99))
+    live_test = sorted([event["label"] for event in events if event.get("state") == "live_test"], key=lambda x: order.get(x, 99))
     near = sorted([event["label"] for event in events if event.get("state") == "near"], key=lambda x: order.get(x, 99))
 
     parts = []
 
     if tested:
         parts.append(f"{'/'.join(tested)} open tested, close below")
+
+    if live_test:
+        parts.append(f"{'/'.join(live_test)} open live test, price below")
 
     if near:
         parts.append(f"near {'/'.join(near)} open resistance")
@@ -1821,17 +1957,19 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     """
     D/W/M/Y open-level resistance context for short-watch setups.
 
-    r13 evaluates open-level tests over a recent setup window, not only the
-    latest closed candle. This keeps D/W/M/Y open resistance aligned with the
-    same recent impulse/sweep event shown in Telegram.
+    r16 evaluates open-level tests over both recent closed candles and the
+    current live candle. This keeps D/W/M/Y open resistance visible when price
+    is actively testing a level before the confirming candle closes.
 
     States:
-    - near from below: price is below the open and very close to it;
+    - near from below: price/live candle is just below the open;
+    - live test, price below: live candle touched/pierced the open from below,
+      but the candle is not closed yet;
     - tested + close below: a recent closed candle touched/pierced the open and
       closed back below.
 
-    D open uses recent 1H closed candles.
-    W/M/Y opens use recent 4H closed candles.
+    D open uses 1H candles.
+    W/M/Y opens use 4H candles.
     """
 
     levels = calculate_open_levels(df_1d)
@@ -1853,6 +1991,9 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
 
     df1 = None if df_1h is None or df_1h.empty else df_1h.copy().reset_index(drop=True)
     df4 = None if df_4h is None or df_4h.empty else df_4h.copy().reset_index(drop=True)
+
+    live_1h_candle, live_1h_index = get_live_candle_for_analysis(df1) if df1 is not None else (None, None)
+    live_4h_candle, live_4h_index = get_live_candle_for_analysis(df4) if df4 is not None else (None, None)
 
     closed_1h_window = get_recent_closed_candles_for_analysis(
         df1,
@@ -1883,6 +2024,8 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
                 df_for_previous=df1,
                 window_tf="1H",
                 window_bars=OPEN_LEVEL_RECENT_WINDOW_1H_BARS,
+                live_candle=live_1h_candle,
+                live_index=live_1h_index,
             )
         else:
             event = evaluate_open_level_context_over_window(
@@ -1893,6 +2036,8 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
                 df_for_previous=df4,
                 window_tf="4H",
                 window_bars=OPEN_LEVEL_RECENT_WINDOW_4H_BARS,
+                live_candle=live_4h_candle,
+                live_index=live_4h_index,
             )
 
         if event is not None:
@@ -2390,6 +2535,11 @@ def calculate_location_trigger_context(short_factors):
         for event in open_events
         if isinstance(event, dict) and event.get("state") == "tested"
     ]
+    live_test_open_labels = [
+        str(event.get("label"))
+        for event in open_events
+        if isinstance(event, dict) and event.get("state") == "live_test"
+    ]
     near_open_labels = [
         str(event.get("label"))
         for event in open_events
@@ -2415,6 +2565,7 @@ def calculate_location_trigger_context(short_factors):
         "htf_open_context_score": float(htf_open_context_score),
         "d_open_context_score": float(d_open_context_score),
         "tested_open_labels": tested_open_labels,
+        "live_test_open_labels": live_test_open_labels,
         "near_open_labels": near_open_labels,
         "has_open_resistance": bool(open_context_score > 0),
         "has_htf_open_resistance": bool(htf_open_context_score > 0),
@@ -4684,6 +4835,18 @@ def make_open_levels_4h_near_case():
     return df
 
 
+def make_open_levels_4h_far_case():
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [90.0, 90.5, 91.0, 91.5, 92.0, 92.5, 93.0, 93.5],
+        "high": [91.0, 91.5, 92.0, 92.5, 93.0, 93.5, 94.0, 94.5],
+        "low": [89.5, 90.0, 90.5, 91.0, 91.5, 92.0, 92.5, 93.0],
+        "close": [90.5, 91.0, 91.5, 92.0, 92.5, 93.0, 93.5, 94.0],
+    })
+    return df
+
+
 
 def make_open_levels_4h_recent_window_test_case():
     """4H open was tested one closed candle before the latest closed candle."""
@@ -4694,6 +4857,20 @@ def make_open_levels_4h_recent_window_test_case():
         "high": [95.0, 96.0, 97.0, 98.0, 99.0, 100.3, 99.2, 98.5],
         "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.2, 97.8, 97.5],
         "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.2, 98.6, 98.1],
+    })
+    return df
+
+
+
+def make_open_levels_4h_live_test_case():
+    """Live 4H candle is testing W/M open from below, but closed 4H candles did not confirm yet."""
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [94.0, 95.0, 96.0, 97.0, 98.0, 98.5, 98.7, 99.0],
+        "high": [95.0, 96.0, 97.0, 98.0, 99.0, 99.2, 99.4, 100.3],
+        "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.1, 98.2, 98.5],
+        "close": [94.8, 95.8, 96.8, 97.8, 98.8, 98.9, 99.0, 99.4],
     })
     return df
 
@@ -4742,12 +4919,23 @@ def run_open_levels_self_tests():
         "W/M open tested, close below",
     ))
 
+    tests.append((
+        "W/M open live test before 4H close",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_confirm_case(),
+            df_4h=make_open_levels_4h_live_test_case(),
+            df_1d=df_1d,
+            current_price=99.4,
+        ),
+        "confirmed",
+        "W/M open live test, price below",
+    ))
 
     tests.append((
         "No open resistance nearby",
         detect_open_levels_context(
             df_1h=make_open_levels_1h_confirm_case(),
-            df_4h=make_open_levels_4h_near_case(),
+            df_4h=make_open_levels_4h_far_case(),
             df_1d=df_1d,
             current_price=97.0,
         ),
