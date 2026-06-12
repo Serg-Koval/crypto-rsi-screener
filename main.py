@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r16"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260612-r17"
 
 RSI_PERIOD = 14
 
@@ -1906,6 +1906,47 @@ def evaluate_open_level_context_over_window(
     return None
 
 
+def open_level_event_rank(event):
+    """Rank open-level context events for one D/W/M/Y level."""
+
+    if not isinstance(event, dict):
+        return (0, 0, -1)
+
+    state_priority = {"tested": 3, "live_test": 2, "near": 1}
+    timeframe_priority = {"4H": 2, "1H": 1}
+
+    state = str(event.get("state", ""))
+    timeframe = str(event.get("confirm_tf", ""))
+    confirm_index = event.get("confirm_index")
+
+    try:
+        confirm_index_value = -1 if confirm_index is None else int(confirm_index)
+    except Exception:
+        confirm_index_value = -1
+
+    return (
+        int(state_priority.get(state, 0)),
+        int(timeframe_priority.get(timeframe, 0)),
+        int(confirm_index_value),
+    )
+
+
+def select_best_open_level_event(events):
+    """Select the strongest event for one open level.
+
+    For W/M/Y opens, r17 checks both 4H and 1H windows.
+    A closed test wins over a live test; 4H wins over 1H only when
+    the state is otherwise equal.
+    """
+
+    valid_events = [event for event in events or [] if isinstance(event, dict)]
+
+    if not valid_events:
+        return None
+
+    return sorted(valid_events, key=open_level_event_rank, reverse=True)[0]
+
+
 def evaluate_open_level_context(label, level_price, current_price, confirm_candle, previous_candle):
     """Backward-compatible single-candle evaluator used by older tests/helpers."""
     threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
@@ -1957,9 +1998,10 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     """
     D/W/M/Y open-level resistance context for short-watch setups.
 
-    r16 evaluates open-level tests over both recent closed candles and the
-    current live candle. This keeps D/W/M/Y open resistance visible when price
-    is actively testing a level before the confirming candle closes.
+    r17 evaluates open-level tests over recent closed candles and the current
+    live candle. D open is checked on 1H. W/M/Y opens are checked on 4H first
+    and also on 1H as a fallback, so a clean 1H reaction from monthly/yearly
+    open resistance is not hidden while the 4H candle is still forming.
 
     States:
     - near from below: price/live candle is just below the open;
@@ -1968,8 +2010,8 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     - tested + close below: a recent closed candle touched/pierced the open and
       closed back below.
 
-    D open uses 1H candles.
-    W/M/Y opens use 4H candles.
+    Open levels are context only. They do not create a short-watch trigger by
+    themselves.
     """
 
     levels = calculate_open_levels(df_1d)
@@ -2014,21 +2056,28 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
             continue
 
         level_price = level.get("open")
+        candidate_events = []
 
-        if label == "D":
-            event = evaluate_open_level_context_over_window(
-                label=label,
-                level_price=level_price,
-                current_price=current_price,
-                closed_candles=closed_1h_window,
-                df_for_previous=df1,
-                window_tf="1H",
-                window_bars=OPEN_LEVEL_RECENT_WINDOW_1H_BARS,
-                live_candle=live_1h_candle,
-                live_index=live_1h_index,
-            )
-        else:
-            event = evaluate_open_level_context_over_window(
+        # D open is a lower-timeframe session level, so 1H is enough.
+        # W/M/Y opens are higher-timeframe levels; 4H gets priority, but a
+        # closed 1H rejection/test is still valid context for a watchlist bot.
+        event_1h = evaluate_open_level_context_over_window(
+            label=label,
+            level_price=level_price,
+            current_price=current_price,
+            closed_candles=closed_1h_window,
+            df_for_previous=df1,
+            window_tf="1H",
+            window_bars=OPEN_LEVEL_RECENT_WINDOW_1H_BARS,
+            live_candle=live_1h_candle,
+            live_index=live_1h_index,
+        )
+
+        if event_1h is not None:
+            candidate_events.append(event_1h)
+
+        if label in ("W", "M", "Y"):
+            event_4h = evaluate_open_level_context_over_window(
                 label=label,
                 level_price=level_price,
                 current_price=current_price,
@@ -2039,6 +2088,11 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
                 live_candle=live_4h_candle,
                 live_index=live_4h_index,
             )
+
+            if event_4h is not None:
+                candidate_events.append(event_4h)
+
+        event = select_best_open_level_event(candidate_events)
 
         if event is not None:
             events.append(event)
@@ -2052,8 +2106,8 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     window_debug = {
         "D_window_tf": "1H",
         "D_window_bars": int(OPEN_LEVEL_RECENT_WINDOW_1H_BARS),
-        "HTF_window_tf": "4H",
-        "HTF_window_bars": int(OPEN_LEVEL_RECENT_WINDOW_4H_BARS),
+        "HTF_window_tf": "4H+1H",
+        "HTF_window_bars": f"{OPEN_LEVEL_RECENT_WINDOW_4H_BARS}+{OPEN_LEVEL_RECENT_WINDOW_1H_BARS}",
     }
 
     if not events:
@@ -2197,6 +2251,81 @@ def build_rejection_event(label, state, level_price, candle, candle_index, windo
     return event
 
 
+def rejection_event_rank(event):
+    """Rank rejection events for one D/W/M/Y level."""
+
+    if not isinstance(event, dict):
+        return (0, 0, -1)
+
+    state_priority = {"tested": 2, "near": 1}
+    timeframe_priority = {"4H": 2, "1H": 1}
+
+    state = str(event.get("state", ""))
+    timeframe = str(event.get("confirm_tf", ""))
+    confirm_index = event.get("confirm_index")
+
+    try:
+        confirm_index_value = -1 if confirm_index is None else int(confirm_index)
+    except Exception:
+        confirm_index_value = -1
+
+    return (
+        int(state_priority.get(state, 0)),
+        int(timeframe_priority.get(timeframe, 0)),
+        int(confirm_index_value),
+    )
+
+
+def select_best_rejection_event(events):
+    valid_events = [event for event in events or [] if isinstance(event, dict)]
+
+    if not valid_events:
+        return None
+
+    return sorted(valid_events, key=rejection_event_rank, reverse=True)[0]
+
+
+def build_rejection_detail(events):
+    """Build readable Telegram detail without mixing 1H and 4H labels."""
+
+    if not events:
+        return "none"
+
+    label_order = {"D": 0, "W": 1, "M": 2, "Y": 3}
+    timeframe_order = {"4H": 0, "1H": 1}
+    parts = []
+
+    for state in ["tested", "near"]:
+        state_events = [event for event in events if event.get("state") == state]
+
+        if not state_events:
+            continue
+
+        timeframes = sorted(
+            {str(event.get("confirm_tf", "N/A")) for event in state_events},
+            key=lambda value: timeframe_order.get(value, 99),
+        )
+
+        for timeframe in timeframes:
+            tf_events = [event for event in state_events if str(event.get("confirm_tf", "N/A")) == timeframe]
+            labels = "/".join(
+                sorted(
+                    {str(event.get("label")) for event in tf_events},
+                    key=lambda value: label_order.get(value, 99),
+                )
+            )
+
+            if not labels:
+                continue
+
+            if state == "tested":
+                parts.append(f"{timeframe} rejection at {labels} open")
+            else:
+                parts.append(f"{timeframe} rejection near {labels} open")
+
+    return " | ".join(parts) if parts else "none"
+
+
 def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=None):
     """
     Rejection Candle v1.
@@ -2204,7 +2333,10 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     A rejection candle is a trigger only when it occurs at D/W/M/Y open-level
     resistance. It uses closed candles only:
     - D open: recent closed 1H candles;
-    - W/M/Y opens: recent closed 4H candles.
+    - W/M/Y opens: recent closed 4H candles first, plus recent closed 1H
+      candles as a valid watchlist trigger.
+
+    Live candles never confirm rejection. They can only be open-level context.
     """
 
     levels = calculate_open_levels(df_1d)
@@ -2234,27 +2366,8 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
         REJECTION_RECENT_WINDOW_4H_BARS,
     ) if df4 is not None else []
 
-    events = []
-
-    for label in ["D", "W", "M", "Y"]:
-        level = levels.get(label)
-        if not level:
-            continue
-
-        level_price = level.get("open")
+    def collect_rejection_events_for_window(label, level_price, closed_window, previous_df, window_tf, window_bars):
         threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
-
-        if label == "D":
-            closed_window = closed_1h_window
-            previous_df = df1
-            window_tf = "1H"
-            window_bars = REJECTION_RECENT_WINDOW_1H_BARS
-        else:
-            closed_window = closed_4h_window
-            previous_df = df4
-            window_tf = "4H"
-            window_bars = REJECTION_RECENT_WINDOW_4H_BARS
-
         label_events = []
 
         for candle, candle_index in closed_window or []:
@@ -2284,9 +2397,41 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
                     window_bars=window_bars,
                 ))
 
-        if label_events:
-            # Prefer the most recent event for each level.
-            events.append(label_events[-1])
+        return label_events
+
+    events = []
+
+    for label in ["D", "W", "M", "Y"]:
+        level = levels.get(label)
+        if not level:
+            continue
+
+        level_price = level.get("open")
+        candidate_events = []
+
+        candidate_events.extend(collect_rejection_events_for_window(
+            label=label,
+            level_price=level_price,
+            closed_window=closed_1h_window,
+            previous_df=df1,
+            window_tf="1H",
+            window_bars=REJECTION_RECENT_WINDOW_1H_BARS,
+        ))
+
+        if label in ("W", "M", "Y"):
+            candidate_events.extend(collect_rejection_events_for_window(
+                label=label,
+                level_price=level_price,
+                closed_window=closed_4h_window,
+                previous_df=df4,
+                window_tf="4H",
+                window_bars=REJECTION_RECENT_WINDOW_4H_BARS,
+            ))
+
+        best_event = select_best_rejection_event(candidate_events)
+
+        if best_event is not None:
+            events.append(best_event)
 
     debug_levels = {
         label: float(level.get("open"))
@@ -2313,18 +2458,7 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
 
     order = {"D": 0, "W": 1, "M": 2, "Y": 3}
     events = sorted(events, key=lambda item: order.get(str(item.get("label")), 99))
-
-    tested = [event for event in events if event.get("state") == "tested"]
-    near = [event for event in events if event.get("state") == "near"]
-    primary = tested[0] if tested else events[0]
-    labels = "/".join(str(event.get("label")) for event in (tested if tested else near))
-    state = "tested" if tested else "near"
-    tf = str(primary.get("confirm_tf", "N/A"))
-
-    if state == "tested":
-        detail = f"{tf} rejection at {labels} open"
-    else:
-        detail = f"{tf} rejection near {labels} open"
+    detail = build_rejection_detail(events)
 
     factor = make_factor(
         key="rejection_candle",
@@ -2342,6 +2476,7 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     }
 
     return factor
+
 
 
 def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
@@ -4874,6 +5009,32 @@ def make_open_levels_4h_live_test_case():
     })
     return df
 
+def make_open_levels_1h_htf_rejection_case():
+    """Closed 1H candle rejects W/M open while 4H has not confirmed it."""
+    timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [95.0, 96.0, 97.0, 98.0, 98.6, 99.0, 99.1, 99.0],
+        "high": [95.8, 96.8, 97.8, 98.8, 99.4, 99.6, 100.5, 99.6],
+        "low": [94.8, 95.8, 96.8, 97.8, 98.2, 98.7, 98.8, 98.7],
+        "close": [95.5, 96.5, 97.5, 98.5, 99.0, 99.2, 99.3, 99.1],
+    })
+    return df
+
+
+def make_open_levels_1h_htf_live_test_case():
+    """Live 1H candle is testing W/M open, but no closed 1H rejection exists yet."""
+    timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [95.0, 96.0, 97.0, 98.0, 98.4, 98.7, 99.0, 99.1],
+        "high": [95.8, 96.8, 97.8, 98.8, 99.1, 99.3, 99.5, 100.5],
+        "low": [94.8, 95.8, 96.8, 97.8, 98.1, 98.4, 98.7, 98.8],
+        "close": [95.5, 96.5, 97.5, 98.5, 98.9, 99.0, 99.2, 99.3],
+    })
+    return df
+
+
 def run_open_levels_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING OPEN LEVELS SELF TESTS")
@@ -4926,6 +5087,30 @@ def run_open_levels_self_tests():
             df_4h=make_open_levels_4h_live_test_case(),
             df_1d=df_1d,
             current_price=99.4,
+        ),
+        "confirmed",
+        "W/M open live test, price below",
+    ))
+
+    tests.append((
+        "W/M open tested by 1H close below",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_htf_rejection_case(),
+            df_4h=make_open_levels_4h_far_case(),
+            df_1d=df_1d,
+            current_price=99.3,
+        ),
+        "confirmed",
+        "W/M open tested, close below",
+    ))
+
+    tests.append((
+        "W/M open live test by 1H before close",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_htf_live_test_case(),
+            df_4h=make_open_levels_4h_far_case(),
+            df_1d=df_1d,
+            current_price=99.3,
         ),
         "confirmed",
         "W/M open live test, price below",
@@ -5285,6 +5470,28 @@ def run_rejection_self_tests():
                 df_4h=make_open_levels_4h_test_without_rejection_case(),
                 df_1d=df_1d,
                 current_price=99.4,
+            ),
+            "not_confirmed",
+            "none",
+        ),
+        (
+            "1H upper rejection at W/M open",
+            detect_rejection_candle(
+                df_1h=make_open_levels_1h_htf_rejection_case(),
+                df_4h=make_open_levels_4h_far_case(),
+                df_1d=df_1d,
+                current_price=99.3,
+            ),
+            "confirmed",
+            "1H rejection at W/M open",
+        ),
+        (
+            "Live 1H test at W/M open is not closed rejection",
+            detect_rejection_candle(
+                df_1h=make_open_levels_1h_htf_live_test_case(),
+                df_4h=make_open_levels_4h_far_case(),
+                df_1d=df_1d,
+                current_price=99.3,
             ),
             "not_confirmed",
             "none",
