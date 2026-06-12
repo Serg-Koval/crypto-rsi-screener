@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r14"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r15"
 
 RSI_PERIOD = 14
 
@@ -95,6 +95,12 @@ OPEN_LEVEL_CONTEXT_WEIGHTS = {
 # Open-level tests should be aligned with the recent setup window, not only the latest closed candle.
 OPEN_LEVEL_RECENT_WINDOW_1H_BARS = 6
 OPEN_LEVEL_RECENT_WINDOW_4H_BARS = 2
+
+# Rejection Candle v1. Rejection is a trigger only when it happens at D/W/M/Y open-level resistance.
+REJECTION_RECENT_WINDOW_1H_BARS = 6
+REJECTION_RECENT_WINDOW_4H_BARS = 2
+REJECTION_MIN_UPPER_WICK_RANGE_PCT = 0.35
+REJECTION_MAX_CLOSE_POSITION_PCT = 0.55
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 TELEGRAM_MAX_SIGNALS = 10
@@ -1949,19 +1955,264 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     return factor
 
 
+
+def candle_has_upper_rejection(candle):
+    """Return True when a closed candle shows short-side rejection character."""
+
+    if candle is None:
+        return False
+
+    open_price = safe_float(candle.get("open"), default=np.nan)
+    high_price = safe_float(candle.get("high"), default=np.nan)
+    low_price = safe_float(candle.get("low"), default=np.nan)
+    close_price = safe_float(candle.get("close"), default=np.nan)
+
+    if any(pd.isna(value) for value in [open_price, high_price, low_price, close_price]):
+        return False
+
+    open_price = float(open_price)
+    high_price = float(high_price)
+    low_price = float(low_price)
+    close_price = float(close_price)
+
+    candle_range = high_price - low_price
+    if candle_range <= 0:
+        return False
+
+    upper_wick = high_price - max(open_price, close_price)
+    upper_wick_pct = upper_wick / candle_range
+    close_position = (close_price - low_price) / candle_range
+
+    return bool(
+        upper_wick_pct >= REJECTION_MIN_UPPER_WICK_RANGE_PCT
+        and close_position <= REJECTION_MAX_CLOSE_POSITION_PCT
+    )
+
+
+def candle_near_open_level_from_below(candle, level_price, threshold_pct):
+    """Return True when candle high approaches an open level from below without touching it."""
+
+    if candle is None or level_price is None:
+        return False
+
+    level_price = safe_float(level_price, default=np.nan)
+    candle_high = safe_float(candle.get("high"), default=np.nan)
+    candle_close = safe_float(candle.get("close"), default=np.nan)
+    candle_open = safe_float(candle.get("open"), default=np.nan)
+
+    if any(pd.isna(value) for value in [level_price, candle_high, candle_close, candle_open]):
+        return False
+
+    level_price = float(level_price)
+    candle_high = float(candle_high)
+    candle_close = float(candle_close)
+    candle_open = float(candle_open)
+
+    if level_price <= 0:
+        return False
+
+    # The candle must remain below the open level and approach it from below.
+    if candle_high >= level_price or candle_close >= level_price or candle_open >= level_price:
+        return False
+
+    distance_pct = (level_price - candle_high) / level_price
+    return bool(0 <= distance_pct <= float(threshold_pct))
+
+
+def build_rejection_event(label, state, level_price, candle, candle_index, window_tf, window_bars):
+    open_price = safe_float(candle.get("open"), default=np.nan)
+    high_price = safe_float(candle.get("high"), default=np.nan)
+    low_price = safe_float(candle.get("low"), default=np.nan)
+    close_price = safe_float(candle.get("close"), default=np.nan)
+
+    candle_range = float(high_price) - float(low_price) if not any(pd.isna(v) for v in [high_price, low_price]) else np.nan
+    upper_wick_pct = np.nan
+    close_position = np.nan
+
+    if candle_range and not pd.isna(candle_range) and candle_range > 0:
+        upper_wick_pct = (float(high_price) - max(float(open_price), float(close_price))) / candle_range
+        close_position = (float(close_price) - float(low_price)) / candle_range
+
+    event = {
+        "label": str(label),
+        "state": str(state),
+        "open": float(level_price),
+        "confirm_tf": str(window_tf),
+        "window_bars": int(window_bars),
+        "confirm_index": None if candle_index is None else int(candle_index),
+        "confirm_high": high_price,
+        "confirm_close": close_price,
+        "upper_wick_pct": upper_wick_pct,
+        "close_position": close_position,
+    }
+
+    if "timestamp" in candle:
+        event["confirm_time"] = str(candle.get("timestamp"))
+
+    return event
+
+
+def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=None):
+    """
+    Rejection Candle v1.
+
+    A rejection candle is a trigger only when it occurs at D/W/M/Y open-level
+    resistance. It uses closed candles only:
+    - D open: recent closed 1H candles;
+    - W/M/Y opens: recent closed 4H candles.
+    """
+
+    levels = calculate_open_levels(df_1d)
+
+    if not levels:
+        factor = make_factor(
+            key="rejection_candle",
+            label="Rejection candle",
+            status="not_enough_data",
+            points=0,
+            detail="1D candles unavailable",
+        )
+        factor["events"] = []
+        factor["debug"] = {"status": "not_enough_data", "reason": "1D_candles_unavailable"}
+        return factor
+
+    df1 = None if df_1h is None or df_1h.empty else df_1h.copy().reset_index(drop=True)
+    df4 = None if df_4h is None or df_4h.empty else df_4h.copy().reset_index(drop=True)
+
+    closed_1h_window = get_recent_closed_candles_for_analysis(
+        df1,
+        REJECTION_RECENT_WINDOW_1H_BARS,
+    ) if df1 is not None else []
+
+    closed_4h_window = get_recent_closed_candles_for_analysis(
+        df4,
+        REJECTION_RECENT_WINDOW_4H_BARS,
+    ) if df4 is not None else []
+
+    events = []
+
+    for label in ["D", "W", "M", "Y"]:
+        level = levels.get(label)
+        if not level:
+            continue
+
+        level_price = level.get("open")
+        threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
+
+        if label == "D":
+            closed_window = closed_1h_window
+            previous_df = df1
+            window_tf = "1H"
+            window_bars = REJECTION_RECENT_WINDOW_1H_BARS
+        else:
+            closed_window = closed_4h_window
+            previous_df = df4
+            window_tf = "4H"
+            window_bars = REJECTION_RECENT_WINDOW_4H_BARS
+
+        label_events = []
+
+        for candle, candle_index in closed_window or []:
+            if not candle_has_upper_rejection(candle):
+                continue
+
+            previous_candle = get_previous_candle(previous_df, candle_index)
+
+            if open_level_tested_from_below(candle, previous_candle, level_price):
+                label_events.append(build_rejection_event(
+                    label=label,
+                    state="tested",
+                    level_price=level_price,
+                    candle=candle,
+                    candle_index=candle_index,
+                    window_tf=window_tf,
+                    window_bars=window_bars,
+                ))
+            elif candle_near_open_level_from_below(candle, level_price, threshold):
+                label_events.append(build_rejection_event(
+                    label=label,
+                    state="near",
+                    level_price=level_price,
+                    candle=candle,
+                    candle_index=candle_index,
+                    window_tf=window_tf,
+                    window_bars=window_bars,
+                ))
+
+        if label_events:
+            # Prefer the most recent event for each level.
+            events.append(label_events[-1])
+
+    debug_levels = {
+        label: float(level.get("open"))
+        for label, level in levels.items()
+        if isinstance(level, dict) and level.get("open") is not None
+    }
+
+    if not events:
+        factor = make_factor(
+            key="rejection_candle",
+            label="Rejection candle",
+            status="not_confirmed",
+            points=0,
+            detail="none",
+        )
+        factor["events"] = []
+        factor["debug"] = {
+            "status": "not_confirmed",
+            "levels": debug_levels,
+            "events": [],
+            "reason": "no_open_level_rejection",
+        }
+        return factor
+
+    order = {"D": 0, "W": 1, "M": 2, "Y": 3}
+    events = sorted(events, key=lambda item: order.get(str(item.get("label")), 99))
+
+    tested = [event for event in events if event.get("state") == "tested"]
+    near = [event for event in events if event.get("state") == "near"]
+    primary = tested[0] if tested else events[0]
+    labels = "/".join(str(event.get("label")) for event in (tested if tested else near))
+    state = "tested" if tested else "near"
+    tf = str(primary.get("confirm_tf", "N/A"))
+
+    if state == "tested":
+        detail = f"{tf} rejection at {labels} open"
+    else:
+        detail = f"{tf} rejection near {labels} open"
+
+    factor = make_factor(
+        key="rejection_candle",
+        label="Rejection candle",
+        status="confirmed",
+        points=2,
+        detail=detail,
+    )
+    factor["events"] = events
+    factor["debug"] = {
+        "status": "confirmed",
+        "levels": debug_levels,
+        "events": events,
+        "reason": detail,
+    }
+
+    return factor
+
+
 def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
     """
-    Current short-watch factor set.
+    Current simplified short-watch factor set.
 
     Active factors:
-    - Liquidity sweep: trigger factor.
-    - Premium zone: location factor.
-    - Local high update: extension/location context.
-    - Open levels: D/W/M/Y resistance context; not a trigger, but can amplify location.
+    - Liquidity sweep: confirmed price-action trigger.
+    - Open levels: D/W/M/Y resistance location/context.
+    - Rejection candle: confirmed trigger only at D/W/M/Y open-level resistance.
 
+    Removed from active model:
+    - Premium/Discount: previous implementation was range-position, not a full ICT dealing range.
+    - New High: too noisy for Telegram and classification.
     """
 
-    premium_factor = detect_premium_zone(df_1h, df_4h)
     open_levels_factor = detect_open_levels_context(
         df_1h=df_1h,
         df_4h=df_4h,
@@ -1971,9 +2222,8 @@ def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
 
     factors = [
         detect_liquidity_sweep(df_1h, df_4h=df_4h),
-        premium_factor,
-        detect_local_high_update(df_1h),
         open_levels_factor,
+        detect_rejection_candle(df_1h=df_1h, df_4h=df_4h, df_1d=df_1d, current_price=current_price),
     ]
 
     score = sum(int(factor.get("points", 0)) for factor in factors)
@@ -1985,7 +2235,6 @@ def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
         "score": score,
         "confirmed_count": confirmed_count,
         "total_count": total_count,
-        "premium_factor": premium_factor,
     }
 
 def calculate_scores(
@@ -2104,27 +2353,21 @@ def calculate_location_trigger_context(short_factors):
     Split short analysis into location context and trigger confirmation.
 
     Location/context:
-    - Premium zone.
-    - Local high update.
     - Open Levels D/W/M/Y resistance context.
 
     Trigger / confirmation:
-    - Confirmed liquidity sweep only.
-
-    Open Levels are not triggers. They amplify location/context and can strengthen
-    signal_level only when a confirmed liquidity sweep exists.
+    - Confirmed liquidity sweep.
+    - Confirmed rejection candle at D/W/M/Y open-level resistance.
     """
 
-    premium = get_short_factor(short_factors, "premium_zone") or {}
-    local_high = get_short_factor(short_factors, "local_high_update") or {}
     open_levels = get_short_factor(short_factors, "open_levels") or {}
-
     liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
+    rejection = get_short_factor(short_factors, "rejection_candle") or {}
+
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
+    rejection_confirmed = is_factor_confirmed(short_factors, "rejection_candle")
     liquidity_candidate = liquidity.get("status") == "candidate"
 
-    premium_points = float(safe_float(premium.get("points", 0), default=0.0))
-    local_high_points = float(safe_float(local_high.get("points", 0), default=0.0))
     open_context_score = float(safe_float(open_levels.get("open_context_score", 0.0), default=0.0))
 
     open_events = open_levels.get("events", []) if isinstance(open_levels, dict) else []
@@ -2153,9 +2396,8 @@ def calculate_location_trigger_context(short_factors):
         if isinstance(event, dict) and event.get("state") == "near"
     ]
 
-    base_location_score = premium_points + local_high_points
-    location_score = base_location_score + open_context_score
-    trigger_count = int(liquidity_confirmed)
+    location_score = open_context_score
+    trigger_count = int(liquidity_confirmed) + int(rejection_confirmed)
     early_trigger_count = int(liquidity_candidate)
 
     trigger_parts = []
@@ -2163,9 +2405,12 @@ def calculate_location_trigger_context(short_factors):
     if liquidity_confirmed:
         trigger_parts.append("liquidity sweep")
 
+    if rejection_confirmed:
+        trigger_parts.append("open-level rejection")
+
     return {
         "location_score": float(location_score),
-        "base_location_score": float(base_location_score),
+        "base_location_score": 0.0,
         "open_context_score": float(open_context_score),
         "htf_open_context_score": float(htf_open_context_score),
         "d_open_context_score": float(d_open_context_score),
@@ -2177,136 +2422,122 @@ def calculate_location_trigger_context(short_factors):
         "trigger_count": trigger_count,
         "early_trigger_count": early_trigger_count,
         "liquidity_confirmed": liquidity_confirmed,
+        "rejection_confirmed": rejection_confirmed,
         "liquidity_candidate": liquidity_candidate,
         "trigger_parts": trigger_parts,
     }
 
+
 def quality_location_label(score):
     score = float(safe_float(score, default=0.0))
 
-    if score >= 5:
-        return "Extreme"
-    if score >= 3:
-        return "Strong"
+    if score >= 2:
+        return "Strong open resistance"
     if score >= 1:
-        return "Moderate"
+        return "Open resistance"
+    if score > 0:
+        return "Minor open resistance"
     return "None"
 
+
 def quality_trigger_label_from_context(context):
-    liquidity_confirmed = bool(context.get("liquidity_confirmed"))
-
-    if liquidity_confirmed:
-        return "Confirmed liquidity sweep"
-
+    parts = context.get("trigger_parts", [])
+    if parts:
+        return " + ".join(str(part) for part in parts)
     return "None"
 
 
 def build_setup_status(signal_level, scores, short_factors):
-    rsi_score = int(scores.get("rsi_score", 0))
     context = calculate_location_trigger_context(short_factors)
-    location_score = float(context.get("location_score", 0.0))
     trigger_count = int(context.get("trigger_count", 0))
     has_overheat_context = bool(scores.get("has_overheat_context", False))
     has_open_resistance = bool(context.get("has_open_resistance", False))
     has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
+    liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
+    rejection_confirmed = bool(context.get("rejection_confirmed", False))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        if has_htf_open_resistance:
-            return "High priority watch — confirmed liquidity sweep + HTF open resistance"
-        if has_open_resistance:
-            return "High priority watch — confirmed liquidity sweep + open resistance"
-        return "High priority watch — strong heat, premium/location, and confirmed liquidity sweep are aligned"
+        if liquidity_confirmed and rejection_confirmed:
+            return "High priority watch — liquidity sweep + open-level rejection"
+        if liquidity_confirmed and has_htf_open_resistance:
+            return "High priority watch — liquidity sweep + HTF open resistance"
+        if rejection_confirmed:
+            return "High priority watch — open-level rejection"
+        return "High priority watch — strong heat and confirmed short trigger"
 
     if signal_level == "SHORT_WATCH":
-        if trigger_count >= 1:
+        if liquidity_confirmed and rejection_confirmed:
+            return "Short watch — liquidity sweep + open-level rejection"
+        if liquidity_confirmed:
             if has_htf_open_resistance:
-                return "Short watch — confirmed liquidity sweep + HTF open resistance"
+                return "Short watch — liquidity sweep + HTF open resistance"
             if has_open_resistance:
-                return "Short watch — confirmed liquidity sweep + open resistance"
+                return "Short watch — liquidity sweep + open resistance"
             return "Short watch — confirmed liquidity sweep detected"
-        return "Short watch — waiting for confirmed liquidity sweep"
+        if rejection_confirmed:
+            return "Short watch — open-level rejection"
+        return "Short watch — waiting for confirmed short trigger"
 
     if signal_level == "OVERHEAT_WATCH":
-        if location_score > 0:
-            if has_open_resistance:
-                return "Overheat watch — RSI heat confirmed near open resistance; waiting for confirmed liquidity sweep"
-            return "Overheat watch — RSI heat confirmed; waiting for confirmed liquidity sweep"
-        return "Overheat watch — RSI heat confirmed; waiting for premium/location and confirmed sweep"
-
-    if signal_level == "PUMP_WATCH":
-        missing = []
-
-        if rsi_score < 1 and not has_overheat_context:
-            missing.append("RSI heat")
-
-        if location_score <= 0:
-            missing.append("premium/location")
-
-        if trigger_count == 0:
-            missing.append("confirmed liquidity sweep")
-
-        if missing:
-            return "Watch only — missing " + " / ".join(missing)
-
-        return "Watch only — setup quality is still insufficient"
+        if has_open_resistance:
+            return "Overheat watch — RSI heat near open resistance; waiting for short trigger"
+        return "Overheat watch — RSI heat confirmed; waiting for short trigger"
 
     return "No watch setup"
+
 
 def build_watch_reason(signal_level, scores, short_factors):
     pump_quality = quality_pump_label(scores.get("pump_score", 0))
     heat_quality = quality_heat_label(scores.get("rsi_score", 0))
     context = calculate_location_trigger_context(short_factors)
-    location_quality = quality_location_label(context.get("location_score", 0))
     trigger_quality = quality_trigger_label_from_context(context)
     has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
     has_open_resistance = bool(context.get("has_open_resistance", False))
-    setup_status = build_setup_status(signal_level, scores, short_factors)
+    liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
+    rejection_confirmed = bool(context.get("rejection_confirmed", False))
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        if has_htf_open_resistance:
-            return f"{pump_quality} pump + {heat_quality} RSI heat + confirmed liquidity sweep + HTF open resistance"
-        if has_open_resistance:
-            return f"{pump_quality} pump + {heat_quality} RSI heat + confirmed liquidity sweep + open resistance"
-        return f"{pump_quality} pump + {heat_quality} RSI heat + {location_quality} location + confirmed liquidity sweep"
+        parts = [f"{pump_quality} pump", f"{heat_quality} RSI heat"]
+        if liquidity_confirmed:
+            parts.append("liquidity sweep")
+        if rejection_confirmed:
+            parts.append("open-level rejection")
+        elif has_htf_open_resistance:
+            parts.append("HTF open resistance")
+        elif has_open_resistance:
+            parts.append("open resistance")
+        return " + ".join(parts)
 
     if signal_level == "SHORT_WATCH":
-        pump_part = "overheat" if scores.get("has_overheat_context") else f"{pump_quality} pump"
-        if has_htf_open_resistance:
-            return f"{pump_part} + {trigger_quality} + HTF open resistance. RSI heat: {heat_quality}"
-        if has_open_resistance:
-            return f"{pump_part} + {trigger_quality} + open resistance. RSI heat: {heat_quality}"
-        return f"{pump_part} + {location_quality} location + {trigger_quality}. RSI heat: {heat_quality}"
+        if rejection_confirmed and liquidity_confirmed:
+            return "liquidity sweep + open-level rejection"
+        if rejection_confirmed:
+            return "open-level rejection"
+        if liquidity_confirmed and has_htf_open_resistance:
+            return "confirmed liquidity sweep + HTF open resistance"
+        if liquidity_confirmed and has_open_resistance:
+            return "confirmed liquidity sweep + open resistance"
+        if liquidity_confirmed:
+            return "confirmed liquidity sweep"
+        return trigger_quality
 
     if signal_level == "OVERHEAT_WATCH":
-        return str(scores.get("overheat_reason") or f"{pump_quality} pump + {heat_quality} RSI heat")
-
-    if signal_level == "PUMP_WATCH":
-        base_parts = [f"{pump_quality} pump"]
-
-        if location_quality != "None":
-            base_parts.append(f"{location_quality} location")
-
+        base = str(scores.get("overheat_reason") or f"{pump_quality} pump + {heat_quality} RSI heat")
         if has_open_resistance:
-            base_parts.append("open resistance")
-
-        if trigger_quality != "None":
-            base_parts.append(trigger_quality)
-
-        return " + ".join(base_parts) + ", but " + setup_status.replace("Watch only — ", "")
+            return base + " + open resistance"
+        return base
 
     return "Watch filters not passed"
 
+
 def classify_watch_signal(scores, short_factors=None):
     """
-    Short Watch Analysis model.
+    Simplified Short Watch model.
 
-    A watchlist candidate must be one of:
-    - pump context with incomplete but relevant location/heat/trigger context;
-    - overheat context based on strict RSI + 24h change + 24h volume thresholds;
-    - short-watch context with location and a confirmed liquidity sweep.
-
-    Open Levels amplify location/context but do not act as standalone triggers.
-    The function does not produce execution signals.
+    Input filter is handled separately by RSI_ENTRY_FILTER.
+    Location/context: Open Levels only.
+    Triggers: confirmed Liquidity Sweep or confirmed Rejection at Open Levels.
+    Telegram output levels: OVERHEAT, SHORT WATCH, HIGH PRIORITY SHORT WATCH.
     """
 
     short_factors = short_factors or []
@@ -2317,44 +2548,39 @@ def classify_watch_signal(scores, short_factors=None):
     context = calculate_location_trigger_context(short_factors)
     location_score = float(context.get("location_score", 0.0))
     trigger_count = int(context.get("trigger_count", 0))
-    liquidity_candidate = bool(context.get("liquidity_candidate"))
     open_context_score = float(context.get("open_context_score", 0.0))
     htf_open_context_score = float(context.get("htf_open_context_score", 0.0))
-    has_strong_open_resistance = bool(context.get("has_strong_open_resistance", False))
-
-    premium_factor = get_short_factor(short_factors, "premium_zone") or {}
-    premium_points = int(premium_factor.get("points", 0))
+    has_open_resistance = bool(context.get("has_open_resistance", False))
+    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
+    liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
+    rejection_confirmed = bool(context.get("rejection_confirmed", False))
 
     has_basic_pump = bool(scores.get("has_basic_pump_context", False)) or pump_score >= 1
     has_strong_pump = bool(scores.get("has_strong_pump_context", False)) or pump_score >= 2
     has_extreme_pump = bool(scores.get("has_extreme_pump_context", False)) or pump_score >= 3
     has_overheat_context = bool(scores.get("has_overheat_context", False))
 
-    has_heat = rsi_score >= 1
     has_strong_heat = rsi_score >= 3 or has_overheat_context
-
-    has_location = location_score >= 2
-    has_strong_location = location_score >= 3 or premium_points >= 2 or has_strong_open_resistance
-    has_premium_or_open_context = premium_points >= 1 or open_context_score >= 1.0
-
     has_trigger = trigger_count >= 1
-
     pump_or_overheat = has_basic_pump or has_overheat_context
 
+    high_priority_context = (
+        has_htf_open_resistance
+        or rejection_confirmed
+        or (has_open_resistance and liquidity_confirmed)
+    )
+
     if (
-        (has_extreme_pump or has_strong_pump)
+        has_trigger
+        and (has_extreme_pump or has_strong_pump)
         and has_strong_heat
-        and has_premium_or_open_context
-        and has_strong_location
-        and has_trigger
+        and high_priority_context
     ):
         signal_level = "HIGH_PRIORITY_SHORT_WATCH"
-    elif pump_or_overheat and has_location and has_trigger:
+    elif pump_or_overheat and has_trigger:
         signal_level = "SHORT_WATCH"
     elif has_overheat_context:
         signal_level = "OVERHEAT_WATCH"
-    elif has_basic_pump and has_location and (has_heat or liquidity_candidate):
-        signal_level = "PUMP_WATCH"
     else:
         signal_level = "NO_SIGNAL"
 
@@ -3756,6 +3982,20 @@ def format_open_levels_detail_for_telegram(factors):
     return ""
 
 
+def format_rejection_detail_for_telegram(factors):
+    factor = find_factor(factors, "rejection_candle") or {}
+    status = factor.get("status")
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if status == "confirmed" and detail:
+        return detail
+
+    if status == "not_enough_data":
+        return "Data unavailable"
+
+    return "none"
+
+
 def format_local_high_detail_for_telegram(factors):
     factor = find_factor(factors, "local_high_update") or {}
     status = factor.get("status")
@@ -3992,6 +4232,56 @@ def log_open_levels_debug_for_grouped_signals(grouped_signals):
         print(" ".join(fields))
 
 
+def log_rejection_debug_for_grouped_signals(grouped_signals):
+    """Print REJECTION_DEBUG lines for Telegram-visible signals."""
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for group in grouped_signals or []:
+        if str(group.get("signal_level")) not in visible_levels:
+            continue
+
+        detail = group.get("display_detail") or {}
+        short_factors = detail.get("short_factors", []) or []
+        factor = find_factor(short_factors, "rejection_candle") or {}
+        events = factor.get("events") if isinstance(factor, dict) else []
+        if not isinstance(events, list):
+            events = []
+
+        event_parts = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_parts.append(
+                ":".join([
+                    format_debug_value(event.get("label")),
+                    format_debug_value(event.get("state")),
+                    format_debug_value(event.get("confirm_tf")),
+                    f"open{format_debug_value(event.get('open'))}",
+                    f"high{format_debug_value(event.get('confirm_high'))}",
+                    f"close{format_debug_value(event.get('confirm_close'))}",
+                    f"wick{format_debug_value(event.get('upper_wick_pct'))}",
+                    f"closepos{format_debug_value(event.get('close_position'))}",
+                ])
+            )
+
+        fields = [
+            "REJECTION_DEBUG",
+            f"symbol={format_debug_value(group.get('symbol'))}",
+            f"exchange={format_debug_value(detail.get('exchange'))}",
+            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
+            f"status={format_debug_value(factor.get('status'))}",
+            f"detail={format_debug_value(factor.get('detail'))}",
+            f"events={format_debug_value('|'.join(event_parts) if event_parts else 'none')}",
+        ]
+
+        print(" ".join(fields))
+
+
 def log_new_high_debug_for_grouped_signals(grouped_signals):
     """Print NEW_HIGH_DEBUG lines for Telegram-visible signals."""
 
@@ -4084,17 +4374,13 @@ def format_multi_provider_telegram(
             setup_status = html.escape(str(detail.get("setup_status", "N/A")))
 
             short_factors = detail.get("short_factors", []) or []
-            premium_info = format_premium_line_from_factors(short_factors)
-            premium_1h = html.escape(format_premium_value_for_telegram(premium_info["premium_1h"]))
-            premium_4h = html.escape(format_premium_value_for_telegram(premium_info["premium_4h"]))
-
             sweep_factor = find_factor(short_factors, "liquidity_sweep") or {}
-            local_high_factor = find_factor(short_factors, "local_high_update") or {}
+            rejection_factor = find_factor(short_factors, "rejection_candle") or {}
 
             sweep_icon = factor_status_icon(sweep_factor)
-            local_high_icon = factor_status_icon(local_high_factor)
+            rejection_icon = factor_status_icon(rejection_factor)
             sweep_detail = html.escape(format_sweep_detail_for_telegram(short_factors))
-            local_high_detail = html.escape(format_local_high_detail_for_telegram(short_factors))
+            rejection_detail = html.escape(format_rejection_detail_for_telegram(short_factors))
 
             reason = html.escape(format_reason_for_telegram(setup_status))
 
@@ -4102,15 +4388,13 @@ def format_multi_provider_telegram(
             lines.append(f"{idx + 1}) {signal_label} — <code>{symbol}</code>")
             lines.append(f"Price {price} | 24h {chg_24h}% | Vol {vol_24h} | ΔVol {vol_chg}%")
             lines.append(f"RSI 1H Live {rsi_1h_live} | Closed {rsi_1h_closed} | 4H Live {rsi_4h_live}")
-            lines.append(f"Premium 1H: {premium_1h} | 4H: {premium_4h}")
-
             open_levels_detail = html.escape(format_open_levels_detail_for_telegram(short_factors))
             if open_levels_detail:
                 lines.append(f"Open Levels: {open_levels_detail}")
 
             lines.append("")
             lines.append(f"Sweep: {sweep_icon} {sweep_detail}")
-            lines.append(f"New High: {local_high_icon} {local_high_detail}")
+            lines.append(f"Rejection: {rejection_icon} {rejection_detail}")
             lines.append(f"Reason: {reason}")
 
             if idx != len(display_groups) - 1:
@@ -4189,7 +4473,7 @@ def run_multi_provider_screener():
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
     log_sweep_debug_for_grouped_signals(grouped_signals)
     log_open_levels_debug_for_grouped_signals(grouped_signals)
-    log_new_high_debug_for_grouped_signals(grouped_signals)
+    log_rejection_debug_for_grouped_signals(grouped_signals)
     df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
@@ -4606,15 +4890,13 @@ def run_open_levels_classification_self_tests():
             "HIGH_PRIORITY_SHORT_WATCH",
         ),
         (
-            "D near alone is minor and does not provide enough location",
+            "Confirmed sweep remains SHORT WATCH even with minor D near context",
             base_scores,
             [
                 make_classification_sweep_factor(),
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["D"], ["near"]),
             ],
-            "NO_SIGNAL",
+            "SHORT_WATCH",
         ),
     ]
 
@@ -4774,6 +5056,71 @@ def run_sweep_self_tests():
 
 
 
+
+
+def make_open_levels_4h_test_without_rejection_case():
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [94.0, 95.0, 96.0, 97.0, 98.0, 99.0, 99.4, 99.2],
+        "high": [95.0, 96.0, 97.0, 98.0, 99.0, 100.2, 100.5, 99.5],
+        "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.4, 98.8, 98.7],
+        "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.4, 100.1, 99.0],
+    })
+    return df
+
+
+def run_rejection_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING REJECTION SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    df_1d = make_open_levels_1d_case()
+
+    tests = [
+        (
+            "4H upper rejection at W/M open",
+            detect_rejection_candle(
+                df_1h=make_open_levels_1h_confirm_case(),
+                df_4h=make_open_levels_4h_test_case(),
+                df_1d=df_1d,
+                current_price=99.4,
+            ),
+            "confirmed",
+            "4H rejection at W/M open",
+        ),
+        (
+            "Open test without rejection candle is ignored",
+            detect_rejection_candle(
+                df_1h=make_open_levels_1h_confirm_case(),
+                df_4h=make_open_levels_4h_test_without_rejection_case(),
+                df_1d=df_1d,
+                current_price=99.4,
+            ),
+            "not_confirmed",
+            "none",
+        ),
+    ]
+
+    failed = 0
+
+    for name, result, expected_status, expected_detail in tests:
+        actual_status = str(result.get("status"))
+        detail = str(result.get("detail", ""))
+        ok = actual_status == expected_status and expected_detail in detail
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"Rejection self-tests failed: {failed}/{len(tests)}")
+
+    print(f"REJECTION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def run_rsi_entry_filter_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING RSI ENTRY FILTER SELF TESTS")
@@ -4810,6 +5157,7 @@ def main():
         run_sweep_self_tests()
         run_open_levels_self_tests()
         run_open_levels_classification_self_tests()
+        run_rejection_self_tests()
         run_local_high_self_tests()
         run_rsi_entry_filter_self_tests()
         return
