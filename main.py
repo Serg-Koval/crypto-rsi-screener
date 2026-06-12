@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r11"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r12"
 
 RSI_PERIOD = 14
 
@@ -69,6 +69,9 @@ LOCAL_HIGH_LOOKBACKS = {
     "48H": 48,
     "7D": 168,
 }
+# Local high is evaluated over the recent setup window, not only the latest live candle.
+# This keeps the factor aligned with a sweep event that may have occurred a few candles before the scan.
+LOCAL_HIGH_RECENT_WINDOW_BARS = 6
 
 # Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
 OPEN_LEVEL_NEAR_THRESHOLDS = {
@@ -1398,7 +1401,17 @@ def detect_premium_zone(
     return factor
 
 
-def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
+def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS, recent_window_bars=LOCAL_HIGH_RECENT_WINDOW_BARS):
+    """
+    Detect whether the recent setup window updated a local 24H / 48H / 7D high.
+
+    Earlier versions checked only the very last 1H candle. That could miss a
+    local-high update when the sweep/pump candle happened a few candles before
+    the scan and the latest candle had already pulled back.
+
+    This factor is still context only, not a trigger.
+    """
+
     if df_1h is None or df_1h.empty:
         return make_factor(
             key="local_high_update",
@@ -1407,9 +1420,38 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
             detail="no 1H candles",
         )
 
+    if "high" not in df_1h.columns:
+        return make_factor(
+            key="local_high_update",
+            label="Local high update",
+            status="not_enough_data",
+            detail="1H high column unavailable",
+        )
+
     df = df_1h.copy().reset_index(drop=True)
-    current = df.iloc[-1]
-    current_high = float(current["high"])
+    highs = pd.to_numeric(df["high"], errors="coerce")
+
+    if highs.dropna().empty:
+        return make_factor(
+            key="local_high_update",
+            label="Local high update",
+            status="not_enough_data",
+            detail="1H highs unavailable",
+        )
+
+    window = max(1, int(recent_window_bars or 1))
+    window = min(window, len(df))
+    setup_slice = highs.iloc[-window:]
+
+    if setup_slice.dropna().empty:
+        return make_factor(
+            key="local_high_update",
+            label="Local high update",
+            status="not_enough_data",
+            detail="recent 1H highs unavailable",
+        )
+
+    setup_high = float(setup_slice.max())
 
     # Check the highest-confidence tiers first. Points are not cumulative.
     tiers = [
@@ -1421,35 +1463,47 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS):
     checked_any = False
 
     for label, lookback, points in tiers:
-        if len(df) < lookback + 1:
+        # Need enough candles before the setup window to compare against.
+        if len(df) < lookback + window:
+            continue
+
+        previous = highs.iloc[-(lookback + window):-window]
+
+        if previous.dropna().empty:
             continue
 
         checked_any = True
-        previous = df.iloc[-(lookback + 1):-1]
-        previous_high = float(previous["high"].max())
+        previous_high = float(previous.max())
 
-        if current_high > previous_high:
-            return make_factor(
+        if setup_high > previous_high:
+            factor = make_factor(
                 key="local_high_update",
                 label="Local high update",
                 status="confirmed",
                 points=points,
-                detail=f"1H: new {label} high",
+                detail=f"{label} high updated",
             )
+            factor["setup_high"] = setup_high
+            factor["previous_high"] = previous_high
+            factor["recent_window_bars"] = int(window)
+            return factor
 
     if checked_any:
-        return make_factor(
+        factor = make_factor(
             key="local_high_update",
             label="Local high update",
             status="not_confirmed",
-            detail="1H: no 24H/48H/7D high update",
+            detail="local high not updated",
         )
+        factor["setup_high"] = setup_high
+        factor["recent_window_bars"] = int(window)
+        return factor
 
     return make_factor(
         key="local_high_update",
         label="Local high update",
         status="not_enough_data",
-        detail="requires at least 25 1H candles",
+        detail="requires enough 1H candles before setup window",
     )
 
 
@@ -1719,6 +1773,12 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         if event is not None:
             events.append(event)
 
+    debug_levels = {
+        label: float(level.get("open"))
+        for label, level in levels.items()
+        if isinstance(level, dict) and level.get("open") is not None
+    }
+
     if not events:
         factor = make_factor(
             key="open_levels",
@@ -1729,6 +1789,13 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         )
         factor["open_context_score"] = 0.0
         factor["events"] = []
+        factor["debug"] = {
+            "status": "not_confirmed",
+            "levels": debug_levels,
+            "events": [],
+            "score": 0.0,
+            "reason": "no_open_resistance_nearby",
+        }
         return factor
 
     detail = build_open_levels_detail(events)
@@ -1743,6 +1810,13 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     )
     factor["open_context_score"] = float(context_score)
     factor["events"] = events
+    factor["debug"] = {
+        "status": "confirmed",
+        "levels": debug_levels,
+        "events": events,
+        "score": float(context_score),
+        "reason": detail,
+    }
 
     return factor
 
@@ -3616,6 +3690,66 @@ def log_sweep_debug_for_grouped_signals(grouped_signals):
         print(" ".join(fields))
 
 
+def log_open_levels_debug_for_grouped_signals(grouped_signals):
+    """
+    Print one compact OPEN_LEVELS_DEBUG line per Telegram-visible signal.
+
+    This stays in GitHub Actions logs only and helps validate D/W/M/Y open
+    resistance detection without making Telegram noisy.
+    """
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for group in grouped_signals or []:
+        if str(group.get("signal_level")) not in visible_levels:
+            continue
+
+        detail = group.get("display_detail") or {}
+        short_factors = detail.get("short_factors", []) or []
+        open_factor = find_factor(short_factors, "open_levels") or {}
+        debug = open_factor.get("debug") or {}
+        events = open_factor.get("events") if isinstance(open_factor, dict) else []
+        if not isinstance(events, list):
+            events = []
+
+        event_parts = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            label = format_debug_value(event.get("label"))
+            state = format_debug_value(event.get("state"))
+            weight = format_debug_value(event.get("weight"))
+            open_price = format_debug_value(event.get("open"))
+            event_parts.append(f"{label}:{state}:w{weight}:open{open_price}")
+
+        levels = debug.get("levels") if isinstance(debug, dict) else {}
+        if not isinstance(levels, dict):
+            levels = {}
+
+        level_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in levels:
+                level_parts.append(f"{label}={format_debug_value(levels.get(label))}")
+
+        fields = [
+            "OPEN_LEVELS_DEBUG",
+            f"symbol={format_debug_value(group.get('symbol'))}",
+            f"exchange={format_debug_value(detail.get('exchange'))}",
+            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
+            f"status={format_debug_value(open_factor.get('status'))}",
+            f"score={format_debug_value(open_factor.get('open_context_score', 0.0))}",
+            f"events={format_debug_value('|'.join(event_parts) if event_parts else 'none')}",
+            f"levels={format_debug_value('|'.join(level_parts) if level_parts else 'none')}",
+            f"detail={format_debug_value(open_factor.get('detail'))}",
+        ]
+
+        print(" ".join(fields))
+
+
 def format_multi_provider_telegram(
     grouped_signals,
     okx_total,
@@ -3774,6 +3908,7 @@ def run_multi_provider_screener():
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
     log_sweep_debug_for_grouped_signals(grouped_signals)
+    log_open_levels_debug_for_grouped_signals(grouped_signals)
     df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
@@ -4195,6 +4330,72 @@ def run_open_levels_classification_self_tests():
     print(f"OPEN LEVELS CLASSIFICATION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
+def make_local_high_recent_update_case(updated=True):
+    rows = []
+
+    # Build enough 1H candles to validate 24H local-high update over a recent setup window.
+    for i in range(35):
+        confirm = 0 if i == 34 else 1
+        high = 100.0
+        open_price = 95.0
+        low = 94.0
+        close = 96.0
+
+        if i >= 29:
+            high = 98.0
+
+        # Setup candle is not the latest candle. This catches the false-negative
+        # case where the last candle has already pulled back.
+        if updated and i == 31:
+            high = 110.0
+            open_price = 101.0
+            low = 99.0
+            close = 104.0
+
+        rows.append((open_price, high, low, close, confirm))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+
+def run_local_high_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING LOCAL HIGH SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    tests = [
+        (
+            "recent setup high updated even if latest candle pulled back",
+            detect_local_high_update(make_local_high_recent_update_case(updated=True)),
+            "confirmed",
+            "24H high updated",
+        ),
+        (
+            "recent setup window without new high",
+            detect_local_high_update(make_local_high_recent_update_case(updated=False)),
+            "not_confirmed",
+            "local high not updated",
+        ),
+    ]
+
+    failed = 0
+
+    for name, result, expected_status, expected_detail in tests:
+        actual_status = str(result.get("status"))
+        detail = str(result.get("detail", ""))
+        ok = actual_status == expected_status and expected_detail in detail
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"Local high self-tests failed: {failed}/{len(tests)}")
+
+    print(f"LOCAL HIGH SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def run_sweep_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING SWEEP SELF TESTS")
@@ -4271,6 +4472,7 @@ def main():
         run_sweep_self_tests()
         run_open_levels_self_tests()
         run_open_levels_classification_self_tests()
+        run_local_high_self_tests()
         return
 
     get_telegram_credentials()
