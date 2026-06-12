@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r12"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260610-r14"
 
 RSI_PERIOD = 14
 
@@ -40,6 +40,12 @@ EXTREME_PUMP_PRICE_CHANGE_24H = 20
 EXTREME_PUMP_VOLUME_CHANGE_24H = 100
 
 RSI_1H_CLOSED_CONFIRMATION = OVERHEAT_WATCH_RSI_1H_CLOSED
+
+# Entry filter for Telegram short-list candidates.
+# A confirmed sweep is not enough if RSI heat is too weak.
+RSI_ENTRY_MIN_1H_LIVE = 65
+RSI_ENTRY_MIN_1H_CLOSED = 65
+RSI_ENTRY_MIN_4H_LIVE = 68
 
 MIN_PRICE_CHANGE_24H = EARLY_PUMP_PRICE_CHANGE_24H
 MIN_VOLUME_USD_24H = OVERHEAT_WATCH_MIN_VOLUME_USD_24H
@@ -86,6 +92,9 @@ OPEN_LEVEL_CONTEXT_WEIGHTS = {
     "M": {"near": 1.00, "tested": 2.00},
     "Y": {"near": 1.00, "tested": 2.00},
 }
+# Open-level tests should be aligned with the recent setup window, not only the latest closed candle.
+OPEN_LEVEL_RECENT_WINDOW_1H_BARS = 6
+OPEN_LEVEL_RECENT_WINDOW_4H_BARS = 2
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 TELEGRAM_MAX_SIGNALS = 10
@@ -1493,7 +1502,7 @@ def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS, recent_windo
             key="local_high_update",
             label="Local high update",
             status="not_confirmed",
-            detail="local high not updated",
+            detail="no 24H/48H/7D high update",
         )
         factor["setup_high"] = setup_high
         factor["recent_window_bars"] = int(window)
@@ -1601,6 +1610,35 @@ def get_previous_candle(df, candle_index):
     return df.iloc[index - 1]
 
 
+def get_recent_closed_candles_for_analysis(df, window_bars):
+    """
+    Return recent closed candles as (candle, index) pairs.
+
+    For providers with explicit confirm flag, use the latest confirm=1 candles.
+    For normalized providers without confirm, treat the last row as live and use
+    candles before it as closed.
+    """
+
+    if df is None or df.empty:
+        return []
+
+    work_df = df.copy().reset_index(drop=True)
+    window = max(1, int(window_bars or 1))
+
+    if "confirm" in work_df.columns:
+        closed_indices = [int(idx) for idx in work_df.index[work_df["confirm"] == 1].tolist()]
+    else:
+        if len(work_df) < 2:
+            return []
+        closed_indices = list(range(0, len(work_df) - 1))
+
+    if not closed_indices:
+        return []
+
+    selected = closed_indices[-window:]
+    return [(work_df.iloc[index], int(index)) for index in selected]
+
+
 def open_level_tested_from_below(confirm_candle, previous_candle, level_price):
     if confirm_candle is None or level_price is None:
         return False
@@ -1658,7 +1696,80 @@ def open_level_near_from_below(current_price, level_price, threshold_pct):
     return 0 <= distance_pct <= float(threshold_pct)
 
 
+def build_open_test_event(label, level_price, confirm_candle, confirm_index, window_tf, window_bars):
+    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
+    event = {
+        "label": label,
+        "state": "tested",
+        "weight": float(weights.get("tested", 0.0)),
+        "open": float(level_price),
+        "confirm_tf": str(window_tf),
+        "window_bars": int(window_bars),
+        "confirm_index": None if confirm_index is None else int(confirm_index),
+    }
+
+    if confirm_candle is not None:
+        event["confirm_high"] = safe_float(confirm_candle.get("high"), default=np.nan)
+        event["confirm_close"] = safe_float(confirm_candle.get("close"), default=np.nan)
+        if "timestamp" in confirm_candle:
+            event["confirm_time"] = str(confirm_candle.get("timestamp"))
+
+    return event
+
+
+def evaluate_open_level_context_over_window(
+    label,
+    level_price,
+    current_price,
+    closed_candles,
+    df_for_previous,
+    window_tf,
+    window_bars,
+):
+    """
+    Evaluate open-level resistance over a recent setup window.
+
+    The first priority is a confirmed test: a recent closed candle touched/pierced
+    the open level from below and closed back below it. If no tested event is
+    found, the function falls back to near-from-below live context.
+    """
+
+    threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
+    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
+
+    tested_candidates = []
+
+    for candle, candle_index in closed_candles or []:
+        previous_candle = get_previous_candle(df_for_previous, candle_index)
+        if open_level_tested_from_below(candle, previous_candle, level_price):
+            tested_candidates.append(build_open_test_event(
+                label=label,
+                level_price=level_price,
+                confirm_candle=candle,
+                confirm_index=candle_index,
+                window_tf=window_tf,
+                window_bars=window_bars,
+            ))
+
+    if tested_candidates:
+        # Prefer the most recent confirmed test in the setup window.
+        return tested_candidates[-1]
+
+    if open_level_near_from_below(current_price, level_price, threshold):
+        return {
+            "label": label,
+            "state": "near",
+            "weight": float(weights.get("near", 0.0)),
+            "open": float(level_price),
+            "confirm_tf": str(window_tf),
+            "window_bars": int(window_bars),
+        }
+
+    return None
+
+
 def evaluate_open_level_context(label, level_price, current_price, confirm_candle, previous_candle):
+    """Backward-compatible single-candle evaluator used by older tests/helpers."""
     threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
     weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
 
@@ -1704,17 +1815,17 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     """
     D/W/M/Y open-level resistance context for short-watch setups.
 
-    This factor is a location/context amplifier in r11:
-    - it does not act as a trigger by itself;
-    - it can strengthen signal_level when a confirmed liquidity sweep exists;
-    - Telegram shows it only when there is relevant open-level resistance.
+    r13 evaluates open-level tests over a recent setup window, not only the
+    latest closed candle. This keeps D/W/M/Y open resistance aligned with the
+    same recent impulse/sweep event shown in Telegram.
 
     States:
     - near from below: price is below the open and very close to it;
-    - tested + close below: candle touched/pierced the open and closed back below.
+    - tested + close below: a recent closed candle touched/pierced the open and
+      closed back below.
 
-    D open uses 1H confirmation for tested state.
-    W/M/Y opens use 4H confirmation for tested state.
+    D open uses recent 1H closed candles.
+    W/M/Y opens use recent 4H closed candles.
     """
 
     levels = calculate_open_levels(df_1d)
@@ -1737,11 +1848,15 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     df1 = None if df_1h is None or df_1h.empty else df_1h.copy().reset_index(drop=True)
     df4 = None if df_4h is None or df_4h.empty else df_4h.copy().reset_index(drop=True)
 
-    closed_1h_candle, closed_1h_index = get_last_closed_candle_for_analysis(df1) if df1 is not None else (None, None)
-    previous_1h_candle = get_previous_candle(df1, closed_1h_index) if df1 is not None else None
+    closed_1h_window = get_recent_closed_candles_for_analysis(
+        df1,
+        OPEN_LEVEL_RECENT_WINDOW_1H_BARS,
+    ) if df1 is not None else []
 
-    closed_4h_candle, closed_4h_index = get_last_closed_candle_for_analysis(df4) if df4 is not None else (None, None)
-    previous_4h_candle = get_previous_candle(df4, closed_4h_index) if df4 is not None else None
+    closed_4h_window = get_recent_closed_candles_for_analysis(
+        df4,
+        OPEN_LEVEL_RECENT_WINDOW_4H_BARS,
+    ) if df4 is not None else []
 
     events = []
 
@@ -1754,20 +1869,24 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         level_price = level.get("open")
 
         if label == "D":
-            event = evaluate_open_level_context(
+            event = evaluate_open_level_context_over_window(
                 label=label,
                 level_price=level_price,
                 current_price=current_price,
-                confirm_candle=closed_1h_candle,
-                previous_candle=previous_1h_candle,
+                closed_candles=closed_1h_window,
+                df_for_previous=df1,
+                window_tf="1H",
+                window_bars=OPEN_LEVEL_RECENT_WINDOW_1H_BARS,
             )
         else:
-            event = evaluate_open_level_context(
+            event = evaluate_open_level_context_over_window(
                 label=label,
                 level_price=level_price,
                 current_price=current_price,
-                confirm_candle=closed_4h_candle,
-                previous_candle=previous_4h_candle,
+                closed_candles=closed_4h_window,
+                df_for_previous=df4,
+                window_tf="4H",
+                window_bars=OPEN_LEVEL_RECENT_WINDOW_4H_BARS,
             )
 
         if event is not None:
@@ -1777,6 +1896,13 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         label: float(level.get("open"))
         for label, level in levels.items()
         if isinstance(level, dict) and level.get("open") is not None
+    }
+
+    window_debug = {
+        "D_window_tf": "1H",
+        "D_window_bars": int(OPEN_LEVEL_RECENT_WINDOW_1H_BARS),
+        "HTF_window_tf": "4H",
+        "HTF_window_bars": int(OPEN_LEVEL_RECENT_WINDOW_4H_BARS),
     }
 
     if not events:
@@ -1795,6 +1921,7 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
             "events": [],
             "score": 0.0,
             "reason": "no_open_resistance_nearby",
+            **window_debug,
         }
         return factor
 
@@ -1816,6 +1943,7 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         "events": events,
         "score": float(context_score),
         "reason": detail,
+        **window_debug,
     }
 
     return factor
@@ -2277,6 +2405,112 @@ def classify_signal(
     classification.update(scores)
 
     return classification
+
+
+def evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
+    """
+    Decide whether a signal is hot enough to enter the Telegram short-list.
+
+    This is a visibility filter for the shortlist. It does not change the
+    underlying signal classification, but weak-RSI SHORT WATCH candidates are
+    hidden from Telegram and grouped output.
+    """
+
+    live_1h = safe_float(rsi_1h_live, default=0.0)
+    closed_1h = safe_float(rsi_1h_closed, default=0.0)
+    live_4h = safe_float(rsi_4h_live, default=0.0)
+
+    conditions = []
+
+    if live_1h >= RSI_ENTRY_MIN_1H_LIVE:
+        conditions.append(f"1H_live>={RSI_ENTRY_MIN_1H_LIVE}")
+
+    if closed_1h >= RSI_ENTRY_MIN_1H_CLOSED:
+        conditions.append(f"1H_closed>={RSI_ENTRY_MIN_1H_CLOSED}")
+
+    if live_4h >= RSI_ENTRY_MIN_4H_LIVE:
+        conditions.append(f"4H_live>={RSI_ENTRY_MIN_4H_LIVE}")
+
+    passed = bool(conditions)
+
+    return {
+        "passed": passed,
+        "reason": "+".join(conditions) if conditions else "RSI_below_entry_threshold",
+        "rsi_1h_live": live_1h,
+        "rsi_1h_closed": closed_1h,
+        "rsi_4h_live": live_4h,
+    }
+
+
+def row_passes_rsi_entry_filter(row):
+    result = evaluate_rsi_entry_filter(
+        rsi_1h_live=row.get("rsi_1h_live"),
+        rsi_1h_closed=row.get("rsi_1h_closed"),
+        rsi_4h_live=row.get("rsi_4h_live"),
+    )
+    return bool(result.get("passed"))
+
+
+def add_rsi_entry_filter_columns(df):
+    if df is None or df.empty:
+        return df
+
+    work_df = df.copy()
+    results = work_df.apply(
+        lambda row: evaluate_rsi_entry_filter(
+            rsi_1h_live=row.get("rsi_1h_live"),
+            rsi_1h_closed=row.get("rsi_1h_closed"),
+            rsi_4h_live=row.get("rsi_4h_live"),
+        ),
+        axis=1,
+    )
+
+    work_df["rsi_entry_passed"] = results.apply(lambda item: bool(item.get("passed")))
+    work_df["rsi_entry_reason"] = results.apply(lambda item: str(item.get("reason", "N/A")))
+
+    return work_df
+
+
+def log_rsi_entry_debug(df):
+    """Print RSI_ENTRY_DEBUG lines for active candidates before shortlist filtering."""
+
+    if df is None or df.empty:
+        return
+
+    if "signal_level" not in df.columns:
+        return
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for _, row in df.iterrows():
+        signal_level = str(row.get("signal_level", "NO_SIGNAL"))
+        if signal_level not in visible_levels:
+            continue
+
+        result = evaluate_rsi_entry_filter(
+            rsi_1h_live=row.get("rsi_1h_live"),
+            rsi_1h_closed=row.get("rsi_1h_closed"),
+            rsi_4h_live=row.get("rsi_4h_live"),
+        )
+
+        fields = [
+            "RSI_ENTRY_DEBUG",
+            f"symbol={format_debug_value(row.get('symbol'))}",
+            f"exchange={format_debug_value(row.get('exchange'))}",
+            f"signal={format_debug_value(signal_level)}",
+            f"passed={format_debug_value(result.get('passed'))}",
+            f"reason={format_debug_value(result.get('reason'))}",
+            f"rsi_1h_live={format_debug_value(result.get('rsi_1h_live'))}",
+            f"rsi_1h_closed={format_debug_value(result.get('rsi_1h_closed'))}",
+            f"rsi_4h_live={format_debug_value(result.get('rsi_4h_live'))}",
+            f"thresholds=1H_live>={RSI_ENTRY_MIN_1H_LIVE}|1H_closed>={RSI_ENTRY_MIN_1H_CLOSED}|4H_live>={RSI_ENTRY_MIN_4H_LIVE}",
+        ]
+
+        print(" ".join(fields))
 
 
 def get_signal_rank(signal_level):
@@ -3537,12 +3771,12 @@ def format_local_high_detail_for_telegram(factors):
         if cleaned:
             return f"{cleaned} updated"
 
-        return "Local high updated"
+        return "24H/48H/7D high updated"
 
     if status == "not_enough_data":
         return "Data unavailable"
 
-    return "not updated"
+    return "no 24H/48H/7D update"
 
 
 def format_premium_value_for_telegram(value):
@@ -3724,7 +3958,13 @@ def log_open_levels_debug_for_grouped_signals(grouped_signals):
             state = format_debug_value(event.get("state"))
             weight = format_debug_value(event.get("weight"))
             open_price = format_debug_value(event.get("open"))
-            event_parts.append(f"{label}:{state}:w{weight}:open{open_price}")
+            confirm_tf = format_debug_value(event.get("confirm_tf"))
+            window_bars = format_debug_value(event.get("window_bars"))
+            confirm_high = format_debug_value(event.get("confirm_high"))
+            confirm_close = format_debug_value(event.get("confirm_close"))
+            event_parts.append(
+                f"{label}:{state}:w{weight}:open{open_price}:tf{confirm_tf}:win{window_bars}:high{confirm_high}:close{confirm_close}"
+            )
 
         levels = debug.get("levels") if isinstance(debug, dict) else {}
         if not isinstance(levels, dict):
@@ -3744,7 +3984,41 @@ def log_open_levels_debug_for_grouped_signals(grouped_signals):
             f"score={format_debug_value(open_factor.get('open_context_score', 0.0))}",
             f"events={format_debug_value('|'.join(event_parts) if event_parts else 'none')}",
             f"levels={format_debug_value('|'.join(level_parts) if level_parts else 'none')}",
+            f"D_window={format_debug_value(debug.get('D_window_tf'))}:{format_debug_value(debug.get('D_window_bars'))}",
+            f"HTF_window={format_debug_value(debug.get('HTF_window_tf'))}:{format_debug_value(debug.get('HTF_window_bars'))}",
             f"detail={format_debug_value(open_factor.get('detail'))}",
+        ]
+
+        print(" ".join(fields))
+
+
+def log_new_high_debug_for_grouped_signals(grouped_signals):
+    """Print NEW_HIGH_DEBUG lines for Telegram-visible signals."""
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for group in grouped_signals or []:
+        if str(group.get("signal_level")) not in visible_levels:
+            continue
+
+        detail = group.get("display_detail") or {}
+        short_factors = detail.get("short_factors", []) or []
+        factor = find_factor(short_factors, "local_high_update") or {}
+
+        fields = [
+            "NEW_HIGH_DEBUG",
+            f"symbol={format_debug_value(group.get('symbol'))}",
+            f"exchange={format_debug_value(detail.get('exchange'))}",
+            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
+            f"status={format_debug_value(factor.get('status'))}",
+            f"detail={format_debug_value(factor.get('detail'))}",
+            f"setup_high={format_debug_value(factor.get('setup_high'))}",
+            f"previous_high={format_debug_value(factor.get('previous_high'))}",
+            f"recent_window_bars={format_debug_value(factor.get('recent_window_bars'))}",
         ]
 
         print(" ".join(fields))
@@ -3836,7 +4110,7 @@ def format_multi_provider_telegram(
 
             lines.append("")
             lines.append(f"Sweep: {sweep_icon} {sweep_detail}")
-            lines.append(f"Local High: {local_high_icon} {local_high_detail}")
+            lines.append(f"New High: {local_high_icon} {local_high_detail}")
             lines.append(f"Reason: {reason}")
 
             if idx != len(display_groups) - 1:
@@ -3875,8 +4149,10 @@ def run_multi_provider_screener():
 
     if df_all.empty:
         df_active = pd.DataFrame()
+        rsi_filtered_out_count = 0
     else:
         df_all["signal_rank"] = df_all["signal_level"].apply(get_signal_rank)
+        df_all = add_rsi_entry_filter_columns(df_all)
 
         df_all = df_all.sort_values(
             by=[
@@ -3892,7 +4168,10 @@ def run_multi_provider_screener():
             ascending=[False, False, False, False, False, False, False, False],
         ).reset_index(drop=True)
 
-        df_active = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
+        df_active_before_rsi_filter = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
+        log_rsi_entry_debug(df_active_before_rsi_filter)
+        rsi_filtered_out_count = len(df_active_before_rsi_filter[~df_active_before_rsi_filter["rsi_entry_passed"]])
+        df_active = df_active_before_rsi_filter[df_active_before_rsi_filter["rsi_entry_passed"]].copy()
 
     print("\n" + "=" * 120)
     print("MULTI-PROVIDER SUMMARY")
@@ -3903,12 +4182,14 @@ def run_multi_provider_screener():
     print("Bitget total universe:", bitget_total)
     print("Bitget prefiltered:", bitget_prefiltered)
     print("Bitget active:", bitget_active)
-    print("Total active signals:", len(df_active))
+    print("RSI entry filtered out:", rsi_filtered_out_count)
+    print("Total active signals after RSI entry filter:", len(df_active))
 
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
     log_sweep_debug_for_grouped_signals(grouped_signals)
     log_open_levels_debug_for_grouped_signals(grouped_signals)
+    log_new_high_debug_for_grouped_signals(grouped_signals)
     df_grouped_output = prepare_grouped_output_table(grouped_signals)
 
     if df_active_output.empty:
@@ -4119,6 +4400,19 @@ def make_open_levels_4h_near_case():
     return df
 
 
+
+def make_open_levels_4h_recent_window_test_case():
+    """4H open was tested one closed candle before the latest closed candle."""
+    timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [94.0, 95.0, 96.0, 97.0, 98.0, 99.0, 98.5, 98.0],
+        "high": [95.0, 96.0, 97.0, 98.0, 99.0, 100.3, 99.2, 98.5],
+        "low": [93.5, 94.5, 95.5, 96.5, 97.5, 98.2, 97.8, 97.5],
+        "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.2, 98.6, 98.1],
+    })
+    return df
+
 def run_open_levels_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING OPEN LEVELS SELF TESTS")
@@ -4152,6 +4446,18 @@ def run_open_levels_self_tests():
         "confirmed",
         "near W/M open resistance",
     ))
+    tests.append((
+        "W/M open tested in recent 4H setup window",
+        detect_open_levels_context(
+            df_1h=make_open_levels_1h_confirm_case(),
+            df_4h=make_open_levels_4h_recent_window_test_case(),
+            df_1d=df_1d,
+            current_price=98.6,
+        ),
+        "confirmed",
+        "W/M open tested, close below",
+    ))
+
 
     tests.append((
         "No open resistance nearby",
@@ -4374,7 +4680,7 @@ def run_local_high_self_tests():
             "recent setup window without new high",
             detect_local_high_update(make_local_high_recent_update_case(updated=False)),
             "not_confirmed",
-            "local high not updated",
+            "no 24H/48H/7D high update",
         ),
     ]
 
@@ -4467,12 +4773,45 @@ def run_sweep_self_tests():
     print(f"SWEEP SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
+
+def run_rsi_entry_filter_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING RSI ENTRY FILTER SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    tests = [
+        ("1H live passes", 65.0, 50.0, 50.0, True),
+        ("1H closed passes", 50.0, 65.0, 50.0, True),
+        ("4H live passes", 50.0, 50.0, 68.0, True),
+        ("weak RSI rejected", 64.9, 64.9, 67.9, False),
+    ]
+
+    failed = 0
+
+    for name, rsi_1h_live, rsi_1h_closed, rsi_4h_live, expected in tests:
+        result = evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
+        actual = bool(result.get("passed"))
+        ok = actual == expected
+        status_text = "PASS" if ok else "FAIL"
+        print(f"{status_text} | {name} | expected={expected} actual={actual} | reason={result.get('reason')}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"RSI entry filter self-tests failed: {failed}/{len(tests)}")
+
+    print(f"RSI ENTRY FILTER SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def main():
     if "--self-test" in sys.argv:
         run_sweep_self_tests()
         run_open_levels_self_tests()
         run_open_levels_classification_self_tests()
         run_local_high_self_tests()
+        run_rsi_entry_filter_self_tests()
         return
 
     get_telegram_credentials()
