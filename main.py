@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260612-r17"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260612-r18"
 
 RSI_PERIOD = 14
 
@@ -86,6 +86,9 @@ OPEN_LEVEL_NEAR_THRESHOLDS = {
     "M": 0.0035,   # 0.35% below monthly open
     "Y": 0.0035,   # 0.35% below yearly open
 }
+# If price has reclaimed an open level, that level is no longer active resistance.
+# This prevents old D/W/M/Y tests from being reported after price has already moved above the level.
+OPEN_LEVEL_RECLAIM_INVALIDATION_PCT = 0.0005  # 0.05% above open level
 OPEN_LEVEL_CONTEXT_WEIGHTS = {
     "D": {"near": 0.50, "live_test": 0.75, "tested": 1.00},
     "W": {"near": 1.00, "live_test": 1.50, "tested": 2.00},
@@ -1681,6 +1684,27 @@ def open_level_tested_from_below(confirm_candle, previous_candle, level_price):
     return bool(approached_from_below)
 
 
+def open_level_reclaimed_by_current_price(current_price, level_price, reclaim_pct=OPEN_LEVEL_RECLAIM_INVALIDATION_PCT):
+    """Return True when the latest price is already back above the open level.
+
+    A D/W/M/Y open can be resistance only while price is below it. If price has
+    reclaimed the level, an older test/rejection is no longer active short-watch
+    context.
+    """
+
+    if current_price is None or level_price is None:
+        return False
+
+    current_price = safe_float(current_price, default=np.nan)
+    level_price = safe_float(level_price, default=np.nan)
+
+    if pd.isna(current_price) or pd.isna(level_price) or float(level_price) <= 0:
+        return False
+
+    reclaim_level = float(level_price) * (1 + float(reclaim_pct))
+    return bool(float(current_price) >= reclaim_level)
+
+
 def open_level_near_from_below(current_price, level_price, threshold_pct):
     if current_price is None or level_price is None:
         return False
@@ -1852,6 +1876,9 @@ def evaluate_open_level_context_over_window(
 
     threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
     weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "live_test": 0.0, "tested": 0.0})
+
+    if open_level_reclaimed_by_current_price(current_price, level_price):
+        return None
 
     tested_candidates = []
 
@@ -2356,6 +2383,12 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     df1 = None if df_1h is None or df_1h.empty else df_1h.copy().reset_index(drop=True)
     df4 = None if df_4h is None or df_4h.empty else df_4h.copy().reset_index(drop=True)
 
+    active_current_price = safe_float(current_price, default=np.nan)
+    if pd.isna(active_current_price) and df1 is not None:
+        live_1h_candle, _ = get_live_candle_for_analysis(df1)
+        if live_1h_candle is not None:
+            active_current_price = safe_float(live_1h_candle.get("close"), default=np.nan)
+
     closed_1h_window = get_recent_closed_candles_for_analysis(
         df1,
         REJECTION_RECENT_WINDOW_1H_BARS,
@@ -2369,6 +2402,9 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     def collect_rejection_events_for_window(label, level_price, closed_window, previous_df, window_tf, window_bars):
         threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
         label_events = []
+
+        if open_level_reclaimed_by_current_price(active_current_price, level_price):
+            return label_events
 
         for candle, candle_index in closed_window or []:
             if not candle_has_upper_rejection(candle):
@@ -4946,6 +4982,19 @@ def make_open_levels_1h_confirm_case():
     return df
 
 
+def make_open_levels_d_rejected_then_reclaimed_case():
+    """D open was rejected earlier, but latest price has already reclaimed it."""
+    timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [92.0, 92.2, 92.4, 92.6, 92.8, 93.0, 93.5, 95.2],
+        "high": [92.6, 92.8, 93.0, 93.2, 93.4, 93.6, 94.4, 96.2],
+        "low": [91.8, 92.0, 92.2, 92.4, 92.6, 92.8, 93.0, 94.8],
+        "close": [92.2, 92.4, 92.6, 92.8, 93.0, 93.2, 93.4, 96.0],
+    })
+    return df
+
+
 def make_open_levels_4h_test_case():
     timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
     df = pd.DataFrame({
@@ -5114,6 +5163,18 @@ def run_open_levels_self_tests():
         ),
         "confirmed",
         "W/M open live test, price below",
+    ))
+
+    tests.append((
+        "D open test invalidated after price reclaimed the level",
+        detect_open_levels_context(
+            df_1h=make_open_levels_d_rejected_then_reclaimed_case(),
+            df_4h=make_open_levels_4h_far_case(),
+            df_1d=df_1d,
+            current_price=96.0,
+        ),
+        "not_confirmed",
+        "no open-level resistance nearby",
     ))
 
     tests.append((
@@ -5484,6 +5545,17 @@ def run_rejection_self_tests():
             ),
             "confirmed",
             "1H rejection at W/M open",
+        ),
+        (
+            "D open rejection invalidated after price reclaimed the level",
+            detect_rejection_candle(
+                df_1h=make_open_levels_d_rejected_then_reclaimed_case(),
+                df_4h=make_open_levels_4h_far_case(),
+                df_1d=df_1d,
+                current_price=96.0,
+            ),
+            "not_confirmed",
+            "none",
         ),
         (
             "Live 1H test at W/M open is not closed rejection",
