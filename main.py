@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260612-r18"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r20"
 
 RSI_PERIOD = 14
 
@@ -65,6 +65,9 @@ LIQUIDITY_SWEEP_EQUAL_HIGH_TOLERANCE_PCT = 0.0025 # highs within 0.25% are treat
 LIQUIDITY_SWEEP_MIN_UPPER_WICK_RANGE_PCT = 0.30 # sweep candle should show rejection/failure character
 LIQUIDITY_SWEEP_SWING_LEFT_BARS = 2
 LIQUIDITY_SWEEP_SWING_RIGHT_BARS = 2
+# A single swing high must stand out from nearby candles.
+# This prevents tiny intrapump pivots from being shown as chart-level liquidity highs.
+LIQUIDITY_SWEEP_MIN_SINGLE_HIGH_PROMINENCE_PCT = 0.0020 # 0.20% above nearby highs
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_1H = 240
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_4H = 120
 PREMIUM_ZONE_LOOKBACK = 72
@@ -81,14 +84,14 @@ LOCAL_HIGH_RECENT_WINDOW_BARS = 6
 
 # Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
 OPEN_LEVEL_NEAR_THRESHOLDS = {
-    "D": 0.0020,   # 0.20% below daily open
+    "D": 0.0040,   # 0.40% below daily open
     "W": 0.0035,   # 0.35% below weekly open
     "M": 0.0035,   # 0.35% below monthly open
     "Y": 0.0035,   # 0.35% below yearly open
 }
 # If price has reclaimed an open level, that level is no longer active resistance.
 # This prevents old D/W/M/Y tests from being reported after price has already moved above the level.
-OPEN_LEVEL_RECLAIM_INVALIDATION_PCT = 0.0005  # 0.05% above open level
+OPEN_LEVEL_RECLAIM_INVALIDATION_PCT = 0.0  # any close back above the open level invalidates old resistance context
 OPEN_LEVEL_CONTEXT_WEIGHTS = {
     "D": {"near": 0.50, "live_test": 0.75, "tested": 1.00},
     "W": {"near": 1.00, "live_test": 1.50, "tested": 2.00},
@@ -538,6 +541,7 @@ def make_liquidity_level(
     touches=1,
     quality=1,
     reaction_pct=0.0,
+    prominence_pct=0.0,
     candidate_time=None,
     level_time=None,
 ):
@@ -564,6 +568,7 @@ def make_liquidity_level(
         "touches": int(touches),
         "quality": int(quality),
         "reaction_pct": float(reaction_pct or 0.0),
+        "prominence_pct": float(prominence_pct or 0.0),
     }
 
 
@@ -577,10 +582,55 @@ def liquidity_level_is_valid(level):
     if float(level.get("reaction_pct", 0.0)) < float(LIQUIDITY_SWEEP_MIN_REACTION_PCT):
         return False
 
+    # For a single swing high, require that it is visually meaningful,
+    # not just a tiny local bump inside the current pump. Equal-high clusters
+    # are handled separately and can be valid through multiple touches.
+    if "swing high" in str(level.get("type", "")):
+        if float(level.get("prominence_pct", 0.0)) < float(LIQUIDITY_SWEEP_MIN_SINGLE_HIGH_PROMINENCE_PCT):
+            return False
+
     if float(level.get("price", 0.0)) <= 0:
         return False
 
     return True
+
+
+def calculate_swing_high_prominence_pct(high_value, left_window, right_window):
+    """
+    Estimate how visible a swing high is compared with nearby candles.
+
+    A tiny pivot that is only a few ticks above its neighbours is often hard to
+    verify visually and should not be reported as a liquidity high.
+    """
+
+    try:
+        high_value = float(high_value)
+
+        if high_value <= 0:
+            return 0.0
+
+        neighbour_values = []
+
+        if left_window is not None and not left_window.empty:
+            neighbour_values.append(float(pd.to_numeric(left_window, errors="coerce").max()))
+
+        if right_window is not None and not right_window.empty:
+            neighbour_values.append(float(pd.to_numeric(right_window, errors="coerce").max()))
+
+        neighbour_values = [value for value in neighbour_values if not pd.isna(value)]
+
+        if not neighbour_values:
+            return 0.0
+
+        neighbour_high = max(neighbour_values)
+
+        if neighbour_high <= 0:
+            return 0.0
+
+        return max(0.0, (high_value - neighbour_high) / high_value)
+
+    except Exception:
+        return 0.0
 
 
 def collect_swing_high_levels(df, candidate_index, timeframe="1H", max_lookback=None):
@@ -630,6 +680,11 @@ def collect_swing_high_levels(df, candidate_index, timeframe="1H", max_lookback=
         if not is_swing_high:
             continue
 
+        prominence_pct = calculate_swing_high_prominence_pct(
+            high_value=float(high_value),
+            left_window=left_window,
+            right_window=right_window,
+        )
         reaction_pct = calculate_reaction_pct_after_level(
             work_df,
             level_index=i,
@@ -648,6 +703,7 @@ def collect_swing_high_levels(df, candidate_index, timeframe="1H", max_lookback=
             touches=1,
             quality=quality,
             reaction_pct=reaction_pct,
+            prominence_pct=prominence_pct,
             candidate_time=candidate_time,
             level_time=level_time,
         )
@@ -702,6 +758,7 @@ def collect_equal_high_levels_from_swings(swing_levels, timeframe="1H"):
         age_bars = min(int(item.get("age_bars", 0)) for item in members)
         age_hours = min(float(item.get("age_hours", 0.0)) for item in members)
         reaction_pct = max(float(item.get("reaction_pct", 0.0)) for item in members)
+        prominence_pct = max(float(item.get("prominence_pct", 0.0)) for item in members)
         quality = 5 if timeframe == "4H" else 4
 
         equal_level = {
@@ -716,6 +773,7 @@ def collect_equal_high_levels_from_swings(swing_levels, timeframe="1H"):
             "touches": int(len(members)),
             "quality": int(quality),
             "reaction_pct": float(reaction_pct),
+            "prominence_pct": float(prominence_pct),
         }
 
         if liquidity_level_is_valid(equal_level):
@@ -922,7 +980,12 @@ def is_sweep_invalidated_by_live_candle(live_candle, swept_high):
 
 def is_confirmation_timeframe_allowed(level, confirm_tf):
     level_tf = str((level or {}).get("timeframe", "1H"))
-    return get_timeframe_hours(confirm_tf) >= get_timeframe_hours(level_tf)
+
+    # r19: keep sweep confirmation strictly on its own timeframe.
+    # A 1H level needs a closed 1H candle.
+    # A 4H level needs a closed 4H candle.
+    # This avoids confusing messages like "1H high swept, 4H close below".
+    return str(confirm_tf) == level_tf
 
 
 def candle_has_sweep_failure_character(candle):
@@ -1069,10 +1132,14 @@ def select_best_confirmed_swept_level(candle, levels, confirm_tf, df_context, ca
     return sorted(
         swept_levels,
         key=lambda item: (
+            # First, prefer the more meaningful level type: equal highs > single highs.
             int(item.get("quality", 0)),
             int(item.get("touches", 1)),
-            int(item.get("age_bars", 0)),
+            # If several levels are swept by the same candle, show the highest one.
+            # This is usually the easiest level to verify on the chart.
             float(item.get("price", 0.0)),
+            float(item.get("prominence_pct", 0.0)),
+            int(item.get("age_bars", 0)),
         ),
         reverse=True,
     )[0]
@@ -1132,11 +1199,13 @@ def make_confirmed_sweep_factor(level, confirm_tf, confirm_candle=None):
 
     confirm_high = None
     confirm_close = None
+    confirm_time = None
 
     if confirm_candle is not None:
         try:
             confirm_high = float(confirm_candle["high"])
             confirm_close = float(confirm_candle["close"])
+            confirm_time = get_candle_timestamp_value(confirm_candle)
         except (KeyError, TypeError, ValueError):
             confirm_high = None
             confirm_close = None
@@ -1147,12 +1216,16 @@ def make_confirmed_sweep_factor(level, confirm_tf, confirm_candle=None):
         "level_tf": str(level.get("timeframe", "N/A")),
         "level_type": str(level.get("type", "N/A")),
         "level_price": swept_price,
+        "source_index": int(level.get("source_index", -1)),
+        "source_time": format_debug_value(level.get("source_time")),
         "age_bars": int(level.get("age_bars", 0)),
         "age_hours": float(level.get("age_hours", 0.0)),
         "touches": int(level.get("touches", 1)),
         "quality": int(level.get("quality", 0)),
         "reaction_pct": float(level.get("reaction_pct", 0.0)) * 100,
+        "prominence_pct": float(level.get("prominence_pct", 0.0)) * 100,
         "confirm_tf": str(confirm_tf),
+        "confirm_time": format_debug_value(confirm_time),
         "confirm_high": confirm_high,
         "confirm_close": confirm_close,
         "reason": "confirmed liquidity sweep",
@@ -1166,9 +1239,9 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
     Confirmed-only level-based liquidity sweep model.
 
     Current rule:
-    - 1H liquidity level can be confirmed by a closed 1H or closed 4H candle.
+    - 1H liquidity level can be confirmed only by a closed 1H candle.
     - 4H liquidity level can be confirmed only by a closed 4H candle.
-    - Lower-TF closes do not confirm higher-TF sweeps.
+    - Cross-timeframe sweep confirmation is intentionally disabled.
     - Live/candidate sweeps are intentionally not reported or scored.
 
     A confirmed buy-side sweep requires:
@@ -1243,27 +1316,8 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
             if swept_4h_level is not None:
                 confirmed_candidates.append((swept_4h_level, "4H", closed_4h_candle))
 
-            # Optional stronger confirmation: a closed 4H candle can confirm pre-existing 1H liquidity levels.
-            candle_4h_time = get_candle_timestamp_value(closed_4h_candle)
-            candidate_1h_index_for_4h = get_index_before_time(df1, candle_4h_time)
-
-            if candidate_1h_index_for_4h is not None and candidate_1h_index_for_4h > 0:
-                levels_1h_for_4h = collect_liquidity_levels_for_timeframe(
-                    df1,
-                    candidate_index=candidate_1h_index_for_4h,
-                    timeframe="1H",
-                    include_rolling=False,
-                )
-                swept_1h_by_4h = select_best_confirmed_swept_level(
-                    candle=closed_4h_candle,
-                    levels=levels_1h_for_4h,
-                    confirm_tf="4H",
-                    df_context=df4,
-                    candidate_index=closed_4h_index,
-                )
-
-                if swept_1h_by_4h is not None:
-                    confirmed_candidates.append((swept_1h_by_4h, "4H", closed_4h_candle))
+            # r19: do not let a 4H close confirm a 1H liquidity level.
+            # Keep sweep detection easy to verify on the same chart timeframe.
 
     if not confirmed_candidates:
         return make_factor(
@@ -2245,6 +2299,49 @@ def candle_near_open_level_from_below(candle, level_price, threshold_pct):
     return bool(0 <= distance_pct <= float(threshold_pct))
 
 
+def candle_has_open_level_rejection_character(candle, level_price=None, state="tested"):
+    """Return True when a closed candle shows failure at/near an open level.
+
+    r19 keeps this simple for visual validation:
+    - a clear upper-wick rejection is valid;
+    - a bearish failed test is also valid, even if the upper wick is not large.
+    """
+
+    if candle is None:
+        return False
+
+    open_price = safe_float(candle.get("open"), default=np.nan)
+    high_price = safe_float(candle.get("high"), default=np.nan)
+    low_price = safe_float(candle.get("low"), default=np.nan)
+    close_price = safe_float(candle.get("close"), default=np.nan)
+
+    if any(pd.isna(value) for value in [open_price, high_price, low_price, close_price]):
+        return False
+
+    open_price = float(open_price)
+    high_price = float(high_price)
+    low_price = float(low_price)
+    close_price = float(close_price)
+
+    candle_range = high_price - low_price
+    if candle_range <= 0:
+        return False
+
+    close_position = (close_price - low_price) / candle_range
+    bearish_body = close_price < open_price
+
+    if candle_has_upper_rejection(candle):
+        return True
+
+    # For a direct test of an open level, a bearish failed candle is acceptable
+    # even without a very large upper wick.
+    if str(state) == "tested":
+        return bool(bearish_body and close_position <= 0.65)
+
+    # For a near-level reaction, keep it stricter to avoid noise.
+    return bool(bearish_body and close_position <= 0.55)
+
+
 def build_rejection_event(label, state, level_price, candle, candle_index, window_tf, window_bars):
     open_price = safe_float(candle.get("open"), default=np.nan)
     high_price = safe_float(candle.get("high"), default=np.nan)
@@ -2407,12 +2504,12 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
             return label_events
 
         for candle, candle_index in closed_window or []:
-            if not candle_has_upper_rejection(candle):
-                continue
-
             previous_candle = get_previous_candle(previous_df, candle_index)
 
             if open_level_tested_from_below(candle, previous_candle, level_price):
+                if not candle_has_open_level_rejection_character(candle, level_price=level_price, state="tested"):
+                    continue
+
                 label_events.append(build_rejection_event(
                     label=label,
                     state="tested",
@@ -2423,6 +2520,9 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
                     window_bars=window_bars,
                 ))
             elif candle_near_open_level_from_below(candle, level_price, threshold):
+                if not candle_has_open_level_rejection_character(candle, level_price=level_price, state="near"):
+                    continue
+
                 label_events.append(build_rejection_event(
                     label=label,
                     state="near",
@@ -4466,12 +4566,16 @@ def log_sweep_debug_for_grouped_signals(grouped_signals):
                 "level_tf",
                 "level_type",
                 "level_price",
+                "source_index",
+                "source_time",
                 "age_bars",
                 "age_hours",
                 "touches",
                 "quality",
                 "reaction_pct",
+                "prominence_pct",
                 "confirm_tf",
+                "confirm_time",
                 "confirm_high",
                 "confirm_close",
                 "reason",
@@ -4952,6 +5056,63 @@ def make_rolling_only_high_take_case():
 
 
 
+
+def make_1h_minor_micro_high_sweep_case():
+    """A tiny local bump should not be reported as a visible 1H high."""
+    rows = []
+
+    for i in range(31):
+        if i == 5:
+            # Only 0.05% above neighbours, below the 0.20% visibility threshold.
+            rows.append((99.8, 100.05, 98.8, 99.6, 1))
+        elif i in [3, 4, 6, 7]:
+            rows.append((99.5, 100.00, 98.5, 99.2, 1))
+        elif i in [8, 9, 10, 11, 12]:
+            rows.append((97.5, 98.0, 96.0, 97.0, 1))
+        elif i == 29:
+            rows.append((99.0, 100.25, 96.0, 99.7, 1))
+        elif i == 30:
+            rows.append((99.6, 99.8, 99.0, 99.5, 0))
+        else:
+            rows.append((98.0, 99.0, 96.0, 98.0, 1))
+
+    return make_synthetic_ohlcv(rows, freq="1h")
+
+def make_1h_level_with_4h_close_only_case():
+    """A visible 1H level exists, but only the 4H candle confirms it.
+
+    r19 should reject this: 1H levels require a closed 1H confirmation.
+    """
+    rows = []
+
+    for i in range(31):
+        if i == 5:
+            rows.append((98.0, 100.0, 97.0, 98.0, 1))
+        elif i in [6, 7, 8, 9, 10, 11, 12]:
+            rows.append((94.0, 96.0, 90.0, 94.0, 1))
+        elif i == 29:
+            # No 1H sweep here: the high stays below the 1H level.
+            rows.append((94.0, 96.0, 93.0, 95.0, 1))
+        elif i == 30:
+            rows.append((95.0, 96.0, 94.0, 95.0, 0))
+        else:
+            rows.append((93.0, 96.0, 90.0, 93.0, 1))
+
+    df_1h = make_synthetic_ohlcv(rows, freq="1h")
+
+    df_4h = make_synthetic_ohlcv([
+        (94.0, 96.0, 90.0, 94.0, 1),
+        (94.0, 96.0, 90.0, 94.0, 1),
+        (94.0, 96.0, 90.0, 94.0, 1),
+        (94.0, 96.0, 90.0, 94.0, 1),
+        (94.0, 96.0, 90.0, 94.0, 1),
+        (99.0, 100.5, 92.0, 95.0, 1),
+        (95.0, 96.0, 94.0, 95.0, 0),
+    ], freq="4h")
+
+    return df_1h, df_4h
+
+
 def make_open_levels_1d_case():
     dates = pd.to_datetime([
         "2026-01-01 00:00:00",
@@ -4978,6 +5139,19 @@ def make_open_levels_1h_confirm_case():
         "high": [95.8, 96.0, 96.1, 96.0, 96.2, 96.0, 96.0, 96.0],
         "low": [94.9, 95.2, 95.4, 95.5, 95.4, 95.3, 95.2, 95.2],
         "close": [95.4, 95.7, 95.8, 95.9, 95.7, 95.6, 95.5, 95.4],
+    })
+    return df
+
+
+def make_open_levels_1h_near_d_rejection_case():
+    """Price fails just under D open; this should read as near-D rejection."""
+    timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [91.0, 91.5, 92.0, 92.5, 93.0, 93.4, 93.8, 93.3],
+        "high": [91.6, 92.1, 92.6, 93.0, 93.4, 93.7, 93.85, 93.5],
+        "low": [90.8, 91.2, 91.7, 92.2, 92.7, 93.0, 93.1, 93.0],
+        "close": [91.4, 91.9, 92.4, 92.8, 93.2, 93.5, 93.25, 93.2],
     })
     return df
 
@@ -5471,6 +5645,25 @@ def run_sweep_self_tests():
         "not_confirmed",
     ))
 
+    tests.append((
+        "minor micro 1H high -> no sweep",
+        detect_liquidity_sweep(
+            df_1h=make_1h_minor_micro_high_sweep_case(),
+            df_4h=make_flat_synthetic_4h(),
+        ),
+        "not_confirmed",
+    ))
+
+    df_1h_cross_tf, df_4h_cross_tf = make_1h_level_with_4h_close_only_case()
+    tests.append((
+        "1H level + 4H close only -> no sweep",
+        detect_liquidity_sweep(
+            df_1h=df_1h_cross_tf,
+            df_4h=df_4h_cross_tf,
+        ),
+        "not_confirmed",
+    ))
+
     failed = 0
 
     for name, result, expected_status in tests:
@@ -5556,6 +5749,17 @@ def run_rejection_self_tests():
             ),
             "not_confirmed",
             "none",
+        ),
+        (
+            "1H bearish failure near D open",
+            detect_rejection_candle(
+                df_1h=make_open_levels_1h_near_d_rejection_case(),
+                df_4h=make_open_levels_4h_far_case(),
+                df_1d=df_1d,
+                current_price=93.2,
+            ),
+            "confirmed",
+            "1H rejection near D open",
         ),
         (
             "Live 1H test at W/M open is not closed rejection",
