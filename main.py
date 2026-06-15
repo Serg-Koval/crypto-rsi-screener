@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r26"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r28"
 
 RSI_PERIOD = 14
 
@@ -107,6 +107,16 @@ REJECTION_RECENT_WINDOW_1H_BARS = 6
 REJECTION_RECENT_WINDOW_4H_BARS = 2
 REJECTION_MIN_UPPER_WICK_RANGE_PCT = 0.35
 REJECTION_MAX_CLOSE_POSITION_PCT = 0.55
+
+# Open Interest context layer (r28).
+# Context only: it is shown in Telegram but does not affect scoring yet.
+OI_HISTORY_PERIOD = "1H"
+OI_CHANGE_FLAT_THRESHOLD_PCT = 2.0
+OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT = 3.0
+OI_CHANGE_4H_ACTIVE_THRESHOLD_PCT = 5.0
+OI_CHANGE_STRONG_4H_THRESHOLD_PCT = 10.0
+OI_CHANGE_NEGATIVE_THRESHOLD_PCT = -5.0
+
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
 TELEGRAM_MAX_SIGNALS = 10
@@ -3658,6 +3668,223 @@ def get_signal_rank(signal_level):
     return ranks.get(signal_level, 0)
 
 
+
+# ============================================================
+# OPEN INTEREST CONTEXT
+# ============================================================
+
+def percent_change_from_values(current_value, previous_value):
+    current = safe_float(current_value, default=np.nan)
+    previous = safe_float(previous_value, default=np.nan)
+
+    if pd.isna(current) or pd.isna(previous) or float(previous) == 0:
+        return None
+
+    return float(((float(current) - float(previous)) / float(previous)) * 100)
+
+
+def extract_timestamp_from_oi_row(row):
+    if isinstance(row, dict):
+        for key in ["ts", "timestamp", "time", "date"]:
+            if key in row and row.get(key) is not None:
+                try:
+                    value = str(row.get(key)).strip()
+                    if value.isdigit():
+                        return pd.to_datetime(int(value), unit="ms")
+                    return pd.to_datetime(value)
+                except Exception:
+                    pass
+        return None
+
+    if isinstance(row, (list, tuple)) and len(row) >= 1:
+        try:
+            value = str(row[0]).strip()
+            if value.isdigit():
+                return pd.to_datetime(int(value), unit="ms")
+            return pd.to_datetime(value)
+        except Exception:
+            return None
+
+    return None
+
+
+def extract_oi_value_from_row(row):
+    """Extract a comparable Open Interest value from flexible API responses."""
+
+    preferred_keys = [
+        "openInterest",
+        "openInterestUsd",
+        "openInterestValue",
+        "oiUsd",
+        "oiCcy",
+        "oi",
+        "amount",
+        "value",
+        "size",
+        "openInterestList",
+    ]
+
+    if isinstance(row, dict):
+        for key in preferred_keys:
+            if key in row:
+                value = safe_float(row.get(key), default=np.nan)
+                if not pd.isna(value) and float(value) > 0:
+                    return float(value)
+
+        for key, raw_value in row.items():
+            if str(key).lower() in {"ts", "timestamp", "time", "date"}:
+                continue
+            value = safe_float(raw_value, default=np.nan)
+            if not pd.isna(value) and float(value) > 0 and float(value) < 10**18:
+                return float(value)
+
+        return None
+
+    if isinstance(row, (list, tuple)):
+        for raw_value in list(row)[1:]:
+            value = safe_float(raw_value, default=np.nan)
+            if not pd.isna(value) and float(value) > 0 and float(value) < 10**18:
+                return float(value)
+
+    return None
+
+
+def normalize_oi_history_rows(rows):
+    normalized = []
+
+    for row in rows or []:
+        timestamp = extract_timestamp_from_oi_row(row)
+        value = extract_oi_value_from_row(row)
+
+        if timestamp is None or value is None:
+            continue
+
+        normalized.append({
+            "timestamp": pd.to_datetime(timestamp),
+            "open_interest": float(value),
+        })
+
+    if not normalized:
+        return pd.DataFrame(columns=["timestamp", "open_interest"])
+
+    df = pd.DataFrame(normalized)
+    df = df.dropna(subset=["timestamp", "open_interest"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df
+
+
+def build_open_interest_metrics(history_df=None, current_oi=None, provider="provider"):
+    history = history_df.copy() if isinstance(history_df, pd.DataFrame) else pd.DataFrame()
+
+    if not history.empty:
+        history["open_interest"] = pd.to_numeric(history["open_interest"], errors="coerce")
+        history = history.dropna(subset=["open_interest"])
+        history = history[history["open_interest"] > 0].reset_index(drop=True)
+
+    current_value = safe_float(current_oi, default=np.nan)
+
+    if not pd.isna(current_value) and float(current_value) > 0:
+        if history.empty or abs(float(history.iloc[-1]["open_interest"]) - float(current_value)) > 1e-12:
+            now_ts = pd.Timestamp.utcnow().tz_localize(None)
+            current_row = pd.DataFrame([{"timestamp": now_ts, "open_interest": float(current_value)}])
+            history = pd.concat([history, current_row], ignore_index=True)
+
+    if history.empty:
+        return {
+            "oi_status": "not_available",
+            "oi_current": None,
+            "oi_change_1h_percent": None,
+            "oi_change_4h_percent": None,
+            "oi_context": "N/A",
+            "oi_source": str(provider),
+        }
+
+    history = history.sort_values("timestamp").reset_index(drop=True)
+    current = float(history.iloc[-1]["open_interest"])
+    previous_1h = float(history.iloc[-2]["open_interest"]) if len(history) >= 2 else np.nan
+    previous_4h = float(history.iloc[-5]["open_interest"]) if len(history) >= 5 else np.nan
+
+    change_1h = percent_change_from_values(current, previous_1h)
+    change_4h = percent_change_from_values(current, previous_4h)
+
+    return {
+        "oi_status": "ok",
+        "oi_current": current,
+        "oi_change_1h_percent": change_1h,
+        "oi_change_4h_percent": change_4h,
+        "oi_context": interpret_open_interest_context(change_1h, change_4h),
+        "oi_source": str(provider),
+    }
+
+
+def interpret_open_interest_context(oi_change_1h, oi_change_4h):
+    change_1h = safe_float(oi_change_1h, default=np.nan)
+    change_4h = safe_float(oi_change_4h, default=np.nan)
+
+    has_1h = not pd.isna(change_1h)
+    has_4h = not pd.isna(change_4h)
+
+    if not has_1h and not has_4h:
+        return "N/A"
+
+    strongest_positive = max(
+        float(change_1h) if has_1h else -999999.0,
+        float(change_4h) if has_4h else -999999.0,
+    )
+    strongest_negative = min(
+        float(change_1h) if has_1h else 999999.0,
+        float(change_4h) if has_4h else 999999.0,
+    )
+
+    if has_4h and float(change_4h) >= OI_CHANGE_STRONG_4H_THRESHOLD_PCT:
+        return "Long build-up"
+
+    if strongest_positive >= OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT:
+        return "Long build-up"
+
+    if strongest_negative <= OI_CHANGE_NEGATIVE_THRESHOLD_PCT:
+        return "Short squeeze / OI unwind"
+
+    flat_1h = (not has_1h) or abs(float(change_1h)) <= OI_CHANGE_FLAT_THRESHOLD_PCT
+    flat_4h = (not has_4h) or abs(float(change_4h)) <= OI_CHANGE_FLAT_THRESHOLD_PCT
+
+    if flat_1h and flat_4h:
+        return "weak OI confirmation"
+
+    return "mixed OI"
+
+
+def format_oi_percent_for_telegram(value):
+    value = safe_float(value, default=np.nan)
+
+    if pd.isna(value):
+        return "N/A"
+
+    return f"{float(value):+.1f}%"
+
+
+def format_oi_line_for_telegram(detail):
+    if not isinstance(detail, dict):
+        return ""
+
+    change_1h = detail.get("oi_change_1h_percent")
+    change_4h = detail.get("oi_change_4h_percent")
+
+    has_1h = change_1h is not None and not pd.isna(safe_float(change_1h, default=np.nan))
+    has_4h = change_4h is not None and not pd.isna(safe_float(change_4h, default=np.nan))
+
+    if not has_1h and not has_4h:
+        return ""
+
+    context = str(detail.get("oi_context", "N/A") or "N/A")
+    line = f"OI: 1H {format_oi_percent_for_telegram(change_1h)} | 4H {format_oi_percent_for_telegram(change_4h)}"
+
+    if context and context != "N/A":
+        line += f" | {context}"
+
+    return line
+
 # ============================================================
 # OKX PROVIDER
 # ============================================================
@@ -3742,6 +3969,77 @@ def okx_tickers_to_dataframe(tickers):
         df["timestamp"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
 
     return df
+
+
+
+def okx_get_open_interest(inst_id):
+    data = safe_get_json(
+        base_url=OKX_BASE_URL,
+        endpoint="/api/v5/public/open-interest",
+        params={
+            "instType": OKX_INST_TYPE,
+            "instId": inst_id,
+        },
+        provider_name="OKX OI",
+    )
+
+    if data.get("code") != "0":
+        raise Exception(f"OKX OI API error: {data.get('msg')}")
+
+    rows = data.get("data", [])
+    if not rows:
+        return None
+
+    return extract_oi_value_from_row(rows[0])
+
+
+def okx_base_ccy_from_inst_id(inst_id):
+    try:
+        return str(inst_id).split("-")[0].upper()
+    except Exception:
+        return ""
+
+
+def okx_get_open_interest_history(inst_id, period=OI_HISTORY_PERIOD):
+    base_ccy = okx_base_ccy_from_inst_id(inst_id)
+
+    if not base_ccy:
+        return pd.DataFrame(columns=["timestamp", "open_interest"])
+
+    data = safe_get_json(
+        base_url=OKX_BASE_URL,
+        endpoint="/api/v5/rubik/stat/contracts/open-interest-history",
+        params={
+            "ccy": base_ccy,
+            "period": period,
+        },
+        provider_name="OKX OI history",
+    )
+
+    if data.get("code") != "0":
+        raise Exception(f"OKX OI history API error: {data.get('msg')}")
+
+    return normalize_oi_history_rows(data.get("data", []))
+
+
+def okx_get_open_interest_metrics(inst_id):
+    try:
+        current_oi = okx_get_open_interest(inst_id)
+    except Exception as e:
+        print(f"OKX OI current unavailable for {inst_id}: {e}")
+        current_oi = None
+
+    try:
+        history_df = okx_get_open_interest_history(inst_id)
+    except Exception as e:
+        print(f"OKX OI history unavailable for {inst_id}: {e}")
+        history_df = pd.DataFrame(columns=["timestamp", "open_interest"])
+
+    return build_open_interest_metrics(
+        history_df=history_df,
+        current_oi=current_oi,
+        provider="OKX",
+    )
 
 
 def okx_candles_to_dataframe(raw_candles):
@@ -3909,6 +4207,8 @@ def okx_analyze_candidate(inst_id, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
+    oi_metrics = okx_get_open_interest_metrics(inst_id)
+
     short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
 
     classification = classify_signal(
@@ -3934,6 +4234,12 @@ def okx_analyze_candidate(inst_id, ticker_row):
         "volume_usd_24h_exact": exact_volume_24h,
         "volume_change_24h_percent": volume_change_24h,
         "price_change_24h_percent": price_change_24h,
+        "oi_current": oi_metrics.get("oi_current"),
+        "oi_change_1h_percent": oi_metrics.get("oi_change_1h_percent"),
+        "oi_change_4h_percent": oi_metrics.get("oi_change_4h_percent"),
+        "oi_context": oi_metrics.get("oi_context", "N/A"),
+        "oi_status": oi_metrics.get("oi_status", "not_available"),
+        "oi_source": oi_metrics.get("oi_source", "OKX"),
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
         "pump_score": classification["pump_score"],
@@ -4209,6 +4515,48 @@ def bitget_volume_change_24h(df_1h):
     return float(((last_24 - prev_24) / prev_24) * 100)
 
 
+
+def bitget_get_open_interest(symbol):
+    data = safe_get_json(
+        base_url=BITGET_BASE_URL,
+        endpoint="/api/v2/mix/market/open-interest",
+        params={
+            "symbol": symbol,
+            "productType": BITGET_PRODUCT_TYPE,
+        },
+        provider_name="Bitget OI",
+    )
+
+    if not bitget_success(data):
+        raise Exception(f"Bitget OI API error: {data.get('msg')}")
+
+    payload = data.get("data")
+
+    if isinstance(payload, list) and payload:
+        return extract_oi_value_from_row(payload[0])
+
+    if isinstance(payload, dict):
+        return extract_oi_value_from_row(payload)
+
+    return None
+
+
+def bitget_get_open_interest_metrics(symbol):
+    # Bitget v2 currently gives public current OI here. r28 keeps this
+    # non-blocking; change values are N/A until a stable historical source is added.
+    try:
+        current_oi = bitget_get_open_interest(symbol)
+    except Exception as e:
+        print(f"Bitget OI current unavailable for {symbol}: {e}")
+        current_oi = None
+
+    return build_open_interest_metrics(
+        history_df=pd.DataFrame(columns=["timestamp", "open_interest"]),
+        current_oi=current_oi,
+        provider="Bitget",
+    )
+
+
 def bitget_build_market_universe():
     contracts = bitget_get_contracts()
     tickers = bitget_get_tickers()
@@ -4275,6 +4623,8 @@ def bitget_analyze_candidate(symbol, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
+    oi_metrics = bitget_get_open_interest_metrics(symbol)
+
     short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
 
     classification = classify_signal(
@@ -4300,6 +4650,12 @@ def bitget_analyze_candidate(symbol, ticker_row):
         "volume_usd_24h_exact": exact_volume_24h,
         "volume_change_24h_percent": volume_change_24h,
         "price_change_24h_percent": price_change_24h,
+        "oi_current": oi_metrics.get("oi_current"),
+        "oi_change_1h_percent": oi_metrics.get("oi_change_1h_percent"),
+        "oi_change_4h_percent": oi_metrics.get("oi_change_4h_percent"),
+        "oi_context": oi_metrics.get("oi_context", "N/A"),
+        "oi_status": oi_metrics.get("oi_status", "not_available"),
+        "oi_source": oi_metrics.get("oi_source", "Bitget"),
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
         "pump_score": classification["pump_score"],
@@ -4466,6 +4822,14 @@ def prepare_active_output_table(df_active):
     df_out["chg_24h_%"] = df_out["price_change_24h_percent"].apply(format_percent_2)
     df_out["vol_24h"] = df_out["volume_usd_24h_exact"].apply(format_large_number)
     df_out["vol_chg_24h_%"] = df_out["volume_change_24h_percent"].apply(format_percent_2)
+    if "oi_change_1h_percent" in df_out.columns:
+        df_out["oi_1h_%"] = df_out["oi_change_1h_percent"].apply(format_oi_percent_for_telegram)
+    else:
+        df_out["oi_1h_%"] = "N/A"
+    if "oi_change_4h_percent" in df_out.columns:
+        df_out["oi_4h_%"] = df_out["oi_change_4h_percent"].apply(format_oi_percent_for_telegram)
+    else:
+        df_out["oi_4h_%"] = "N/A"
 
     columns = [
         "exchange",
@@ -4478,6 +4842,9 @@ def prepare_active_output_table(df_active):
         "chg_24h_%",
         "vol_24h",
         "vol_chg_24h_%",
+        "oi_1h_%",
+        "oi_4h_%",
+        "oi_context",
         "pump_score",
         "rsi_score",
         "volume_score",
@@ -4561,6 +4928,12 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
                 "chg_24h_%": format_percent_2(row["price_change_24h_percent"]),
                 "vol_24h": format_large_number(row["volume_usd_24h_exact"]),
                 "vol_chg_24h_%": format_percent_2(row["volume_change_24h_percent"]),
+                "oi_current": row.get("oi_current"),
+                "oi_change_1h_percent": row.get("oi_change_1h_percent"),
+                "oi_change_4h_percent": row.get("oi_change_4h_percent"),
+                "oi_context": str(row.get("oi_context", "N/A")),
+                "oi_status": str(row.get("oi_status", "not_available")),
+                "oi_source": str(row.get("oi_source", row.get("exchange", "N/A"))),
                 "pump_score": int(row.get("pump_score", 0)),
                 "rsi_score": int(row.get("rsi_score", 0)),
                 "volume_score": int(row.get("volume_score", 0)),
@@ -5013,6 +5386,36 @@ def format_debug_value(value):
     return "_".join(text.split())
 
 
+
+def log_oi_debug_for_grouped_signals(grouped_signals):
+    """Print OI_DEBUG lines for Telegram-visible signals."""
+
+    visible_levels = {
+        "HIGH_PRIORITY_SHORT_WATCH",
+        "SHORT_WATCH",
+        "OVERHEAT_WATCH",
+    }
+
+    for group in grouped_signals or []:
+        if str(group.get("signal_level")) not in visible_levels:
+            continue
+
+        detail = group.get("display_detail") or {}
+        fields = [
+            "OI_DEBUG",
+            f"symbol={format_debug_value(group.get('symbol'))}",
+            f"exchange={format_debug_value(detail.get('exchange'))}",
+            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
+            f"status={format_debug_value(detail.get('oi_status'))}",
+            f"source={format_debug_value(detail.get('oi_source'))}",
+            f"current={format_debug_value(detail.get('oi_current'))}",
+            f"change_1h={format_debug_value(detail.get('oi_change_1h_percent'))}",
+            f"change_4h={format_debug_value(detail.get('oi_change_4h_percent'))}",
+            f"context={format_debug_value(detail.get('oi_context'))}",
+        ]
+        print(" ".join(fields))
+
+
 def log_sweep_debug_for_grouped_signals(grouped_signals):
     """
     Print one compact SWEEP_DEBUG line per Telegram-visible signal.
@@ -5366,6 +5769,9 @@ def format_multi_provider_telegram(
             lines.append(f"{idx + 1}) {signal_label} — <code>{symbol}</code>")
             lines.append(f"Price {price} | 24h {chg_24h}% | Vol {vol_24h} | ΔVol {vol_chg}%")
             lines.append(f"RSI 1H Live {rsi_1h_live} | Closed {rsi_1h_closed} | 4H Live {rsi_4h_live}")
+            oi_line = html.escape(format_oi_line_for_telegram(detail))
+            if oi_line:
+                lines.append(oi_line)
             open_levels_detail = html.escape(format_open_levels_detail_for_telegram(short_factors))
             if open_levels_detail:
                 lines.append(f"Open Levels: {open_levels_detail}")
@@ -5379,7 +5785,7 @@ def format_multi_provider_telegram(
                 lines.append("────────────")
 
     lines.append("")
-    lines.append("Planned: ⚪ OI/Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS | ⚪ Div")
+    lines.append("Planned: ⚪ Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS | ⚪ Div")
 
     return "\n".join(lines)
 
@@ -5449,6 +5855,7 @@ def run_multi_provider_screener():
 
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
+    log_oi_debug_for_grouped_signals(grouped_signals)
     log_sweep_debug_for_grouped_signals(grouped_signals)
     log_open_levels_debug_for_grouped_signals(grouped_signals)
     log_rejection_debug_for_grouped_signals(grouped_signals)
@@ -6622,6 +7029,38 @@ def run_rsi_entry_filter_self_tests():
     print(f"RSI ENTRY FILTER SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
+
+def run_open_interest_self_tests():
+    print("RUNNING OPEN INTEREST SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+
+    tests = []
+    tests.append(("long_build_up_4h", interpret_open_interest_context(2.5, 12.0) == "Long build-up"))
+    tests.append(("short_squeeze_unwind", interpret_open_interest_context(-1.0, -7.0) == "Short squeeze / OI unwind"))
+    tests.append(("weak_confirmation", interpret_open_interest_context(0.7, 1.5) == "weak OI confirmation"))
+    tests.append((
+        "format_line",
+        format_oi_line_for_telegram({
+            "oi_change_1h_percent": 8.44,
+            "oi_change_4h_percent": 21.74,
+            "oi_context": "Long build-up",
+        }) == "OI: 1H +8.4% | 4H +21.7% | Long build-up",
+    ))
+
+    failed = 0
+    for name, passed in tests:
+        if passed:
+            print(f"✅ {name}")
+        else:
+            failed += 1
+            print(f"❌ {name}")
+
+    if failed:
+        raise AssertionError(f"Open Interest self-tests failed: {failed}/{len(tests)}")
+
+    print(f"OPEN INTEREST SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def main():
     if "--self-test" in sys.argv:
         run_sweep_self_tests()
@@ -6630,6 +7069,7 @@ def main():
         run_rejection_self_tests()
         run_local_high_self_tests()
         run_rsi_entry_filter_self_tests()
+        run_open_interest_self_tests()
         return
 
     get_telegram_credentials()
