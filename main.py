@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r23"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r24"
 
 RSI_PERIOD = 14
 
@@ -2327,25 +2327,114 @@ def evaluate_open_level_context(label, level_price, current_price, confirm_candl
     return None
 
 
+def format_open_level_price_for_telegram(value):
+    """Format D/W/M/Y open values for compact Telegram diagnostics.
+
+    For normal-price coins three decimals are enough. For small tokens, keep
+    more decimals so the level remains useful instead of becoming 0.000.
+    """
+
+    if value is None or pd.isna(value):
+        return "N/A"
+
+    value = float(value)
+    abs_value = abs(value)
+
+    if abs_value >= 1:
+        return f"{value:.3f}"
+
+    if abs_value >= 0.1:
+        return f"{value:.3f}"
+
+    if abs_value >= 0.01:
+        return f"{value:.5f}"
+
+    if abs_value >= 0.001:
+        return f"{value:.6f}"
+
+    return f"{value:.8f}"
+
+
+def format_open_level_group_prices(events):
+    """Return compact level values for a group of D/W/M/Y events."""
+
+    order = {"D": 0, "W": 1, "M": 2, "Y": 3}
+    clean_events = [event for event in (events or []) if isinstance(event, dict)]
+
+    if not clean_events:
+        return ""
+
+    by_label = {}
+    for event in clean_events:
+        label = str(event.get("label", "")).strip()
+        level_price = event.get("open")
+
+        if not label or level_price is None or pd.isna(level_price):
+            continue
+
+        by_label[label] = float(level_price)
+
+    if not by_label:
+        return ""
+
+    labels = sorted(by_label.keys(), key=lambda value: order.get(value, 99))
+    values = [by_label[label] for label in labels]
+
+    # If grouped labels have effectively the same level value, show it once.
+    if len(values) > 1:
+        reference = values[0]
+        same_value = all(
+            reference > 0 and abs(value - reference) / reference <= 0.00001
+            for value in values
+        )
+        if same_value:
+            return f"({format_open_level_price_for_telegram(reference)})"
+
+    if len(values) == 1:
+        return f"({format_open_level_price_for_telegram(values[0])})"
+
+    parts = [
+        f"{label} {format_open_level_price_for_telegram(by_label[label])}"
+        for label in labels
+    ]
+    return f"({' / '.join(parts)})"
+
+
 def build_open_levels_detail(events):
     if not events:
         return ""
 
     order = {"D": 0, "W": 1, "M": 2, "Y": 3}
-    tested = sorted([event["label"] for event in events if event.get("state") == "tested"], key=lambda x: order.get(x, 99))
-    live_test = sorted([event["label"] for event in events if event.get("state") == "live_test"], key=lambda x: order.get(x, 99))
-    near = sorted([event["label"] for event in events if event.get("state") == "near"], key=lambda x: order.get(x, 99))
+
+    def labels_for(state):
+        return sorted(
+            [event["label"] for event in events if event.get("state") == state],
+            key=lambda x: order.get(x, 99),
+        )
+
+    def events_for(state):
+        return [event for event in events if event.get("state") == state]
+
+    tested = labels_for("tested")
+    live_test = labels_for("live_test")
+    near = labels_for("near")
 
     parts = []
 
     if tested:
-        parts.append(f"{'/'.join(tested)} open tested, close below")
+        prices = format_open_level_group_prices(events_for("tested"))
+        suffix = f" {prices}" if prices else ""
+        parts.append(f"{'/'.join(tested)} open tested, close below{suffix}")
 
     if live_test:
-        parts.append(f"{'/'.join(live_test)} open live test, price below")
+        prices = format_open_level_group_prices(events_for("live_test"))
+        suffix = f" {prices}" if prices else ""
+        parts.append(f"{'/'.join(live_test)} open live test, price below{suffix}")
 
     if near:
-        parts.append(f"near {'/'.join(near)} open resistance")
+        prices = format_open_level_group_prices(events_for("near"))
+        suffix = f" {prices}" if prices else ""
+        parts.append(f"near {'/'.join(near)} open resistance{suffix}")
 
     return " | ".join(parts)
 
@@ -2752,10 +2841,13 @@ def build_rejection_detail(events):
             if not labels:
                 continue
 
+            prices = format_open_level_group_prices(tf_events)
+            suffix = f" {prices}" if prices else ""
+
             if state == "tested":
-                parts.append(f"{timeframe} rejection at {labels} open")
+                parts.append(f"{timeframe} rejection at {labels} open{suffix}")
             else:
-                parts.append(f"{timeframe} rejection near {labels} open")
+                parts.append(f"{timeframe} rejection near {labels} open{suffix}")
 
     return " | ".join(parts) if parts else "none"
 
