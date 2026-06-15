@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r21"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r22"
 
 RSI_PERIOD = 14
 
@@ -1702,6 +1702,143 @@ def get_recent_closed_candles_for_analysis(df, window_bars):
     return [(work_df.iloc[index], int(index)) for index in selected]
 
 
+def get_all_closed_candles_for_analysis(df):
+    """Return all closed candles as (candle, index) pairs.
+
+    This is used to validate whether an old open-level rejection is still active.
+    A rejection is cancelled if price later closes back above the same open level.
+    """
+
+    if df is None or df.empty:
+        return []
+
+    work_df = df.copy().reset_index(drop=True)
+
+    if "confirm" in work_df.columns:
+        closed_indices = [int(idx) for idx in work_df.index[work_df["confirm"] == 1].tolist()]
+    else:
+        if len(work_df) < 2:
+            return []
+        closed_indices = list(range(0, len(work_df) - 1))
+
+    return [(work_df.iloc[index], int(index)) for index in closed_indices]
+
+
+def get_last_closed_close_for_analysis(df):
+    closed = get_all_closed_candles_for_analysis(df)
+
+    if not closed:
+        return np.nan
+
+    candle, _ = closed[-1]
+    return safe_float(candle.get("close"), default=np.nan)
+
+
+def event_confirm_time(event):
+    try:
+        value = (event or {}).get("confirm_time")
+
+        if value is None or str(value).strip() == "":
+            return None
+
+        parsed = pd.to_datetime(value, errors="coerce")
+
+        if pd.isna(parsed):
+            return None
+
+        return parsed
+    except Exception:
+        return None
+
+
+def closed_candle_reclaimed_level_after_event(df, level_price, event, same_timeframe=False):
+    """Return True if a closed candle after the event reclaimed the open level."""
+
+    if df is None or df.empty or event is None or level_price is None:
+        return False
+
+    level_price = safe_float(level_price, default=np.nan)
+
+    if pd.isna(level_price) or float(level_price) <= 0:
+        return False
+
+    event_time = event_confirm_time(event)
+    event_index = (event or {}).get("confirm_index")
+    closed = get_all_closed_candles_for_analysis(df)
+
+    if not closed:
+        return False
+
+    for candle, candle_index in closed:
+        include_candle = False
+
+        if event_time is not None and "timestamp" in candle.index:
+            candle_time = get_candle_timestamp_value(candle)
+
+            if candle_time is not None:
+                include_candle = pd.to_datetime(candle_time) > event_time
+        elif same_timeframe and event_index is not None:
+            try:
+                include_candle = int(candle_index) > int(event_index)
+            except Exception:
+                include_candle = False
+
+        if not include_candle:
+            continue
+
+        close_value = safe_float(candle.get("close"), default=np.nan)
+
+        if not pd.isna(close_value) and float(close_value) >= float(level_price):
+            return True
+
+    return False
+
+
+def open_level_event_is_active_resistance(event, level_price, current_price=None, df_1h=None, df_4h=None):
+    """Validate that an open-level test/rejection is still active now.
+
+    The bot should not keep reporting an old rejection after the level has been
+    reclaimed by later closed candles. This prevents BANANAS/NEAR/USELESS-like
+    false positives where an old M-open rejection remains in the recent window,
+    but price has already closed above that M open afterwards.
+    """
+
+    if event is None or level_price is None:
+        return False
+
+    level_price = safe_float(level_price, default=np.nan)
+
+    if pd.isna(level_price) or float(level_price) <= 0:
+        return False
+
+    # Current/live price must still be below the open level. Otherwise that
+    # open is no longer resistance for a short-watch rejection.
+    if open_level_reclaimed_by_current_price(current_price, level_price):
+        return False
+
+    # Last closed 1H should also remain below the level. If it closed above,
+    # an older rejection has already been invalidated, even if the live price
+    # later falls back below.
+    last_closed_1h = get_last_closed_close_for_analysis(df_1h)
+    if not pd.isna(last_closed_1h) and float(last_closed_1h) >= float(level_price):
+        return False
+
+    # Same for the latest closed 4H when available.
+    last_closed_4h = get_last_closed_close_for_analysis(df_4h)
+    if not pd.isna(last_closed_4h) and float(last_closed_4h) >= float(level_price):
+        return False
+
+    event_tf = str((event or {}).get("confirm_tf", ""))
+
+    if closed_candle_reclaimed_level_after_event(df_1h, level_price, event, same_timeframe=(event_tf == "1H")):
+        return False
+
+    if closed_candle_reclaimed_level_after_event(df_4h, level_price, event, same_timeframe=(event_tf == "4H")):
+        return False
+
+    return True
+
+
 def open_level_tested_from_below(confirm_candle, previous_candle, level_price):
     if confirm_candle is None or level_price is None:
         return False
@@ -1939,17 +2076,26 @@ def evaluate_open_level_context_over_window(
     for candle, candle_index in closed_candles or []:
         previous_candle = get_previous_candle(df_for_previous, candle_index)
         if open_level_tested_from_below(candle, previous_candle, level_price):
-            tested_candidates.append(build_open_test_event(
+            event = build_open_test_event(
                 label=label,
                 level_price=level_price,
                 confirm_candle=candle,
                 confirm_index=candle_index,
                 window_tf=window_tf,
                 window_bars=window_bars,
-            ))
+            )
+
+            if open_level_event_is_active_resistance(
+                event,
+                level_price,
+                current_price=current_price,
+                df_1h=df_for_previous if str(window_tf) == "1H" else None,
+                df_4h=df_for_previous if str(window_tf) == "4H" else None,
+            ):
+                tested_candidates.append(event)
 
     if tested_candidates:
-        # Prefer the most recent confirmed test in the setup window.
+        # Prefer the most recent active confirmed test in the setup window.
         return tested_candidates[-1]
 
     if open_level_live_test_from_below(live_candle, level_price):
@@ -2173,7 +2319,19 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
             if event_4h is not None:
                 candidate_events.append(event_4h)
 
-        event = select_best_open_level_event(candidate_events)
+        active_candidate_events = [
+            event
+            for event in candidate_events
+            if open_level_event_is_active_resistance(
+                event,
+                level_price,
+                current_price=current_price,
+                df_1h=df1,
+                df_4h=df4,
+            )
+        ]
+
+        event = select_best_open_level_event(active_candidate_events)
 
         if event is not None:
             events.append(event)
@@ -2578,7 +2736,19 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
             window_bars=REJECTION_RECENT_WINDOW_4H_BARS,
         ))
 
-        best_event = select_best_rejection_event(candidate_events)
+        active_candidate_events = [
+            event
+            for event in candidate_events
+            if open_level_event_is_active_resistance(
+                event,
+                level_price,
+                current_price=active_current_price,
+                df_1h=df1,
+                df_4h=df4,
+            )
+        ]
+
+        best_event = select_best_rejection_event(active_candidate_events)
 
         if best_event is not None:
             events.append(best_event)
@@ -5390,6 +5560,30 @@ def run_open_levels_self_tests():
     ))
 
     tests.append((
+        "BANANAS-like old M test invalid after later closes above M",
+        detect_open_levels_context(
+            df_1h=make_open_levels_old_month_rejection_then_closed_above_case(),
+            df_4h=make_open_levels_far_below_month_case(),
+            df_1d=make_open_levels_month_only_1d_case(),
+            current_price=99.4,
+        ),
+        "not_confirmed",
+        "no open-level resistance nearby",
+    ))
+
+    tests.append((
+        "USELESS-like near M invalid after later reclaim",
+        detect_open_levels_context(
+            df_1h=make_open_levels_useless_like_case(),
+            df_4h=make_open_levels_far_below_month_case(),
+            df_1d=make_open_levels_month_only_1d_case(),
+            current_price=100.2,
+        ),
+        "not_confirmed",
+        "no open-level resistance nearby",
+    ))
+
+    tests.append((
         "VVV-like W reclaimed and M not reached",
         detect_open_levels_context(
             df_1h=make_open_levels_w_reclaimed_m_not_reached_case(),
@@ -5790,6 +5984,31 @@ def make_open_levels_month_reclaimed_case():
     })
 
 
+def make_open_levels_old_month_rejection_then_closed_above_case():
+    """BANANAS-like: older M-open rejection, then later closed candles reclaimed M."""
+    timestamps = pd.date_range("2026-06-15 00:00:00", periods=9, freq="1h")
+    return pd.DataFrame({
+        "timestamp": timestamps,
+        # M open in make_open_levels_month_only_1d_case is 100.
+        "open":  [96.0, 97.0, 98.0, 99.0, 99.4, 100.2, 100.5, 100.4, 99.6],
+        "high":  [97.0, 98.0, 99.0, 100.4, 99.8, 100.8, 100.9, 100.7, 99.9],
+        "low":   [95.5, 96.5, 97.5, 98.4, 98.8, 99.8, 100.1, 100.0, 99.2],
+        "close": [96.8, 97.8, 98.8, 99.1, 99.2, 100.4, 100.6, 100.3, 99.4],
+    })
+
+
+def make_open_levels_useless_like_case():
+    """USELESS-like: M open is already reclaimed, so it is not resistance."""
+    timestamps = pd.date_range("2026-06-15 00:00:00", periods=9, freq="1h")
+    return pd.DataFrame({
+        "timestamp": timestamps,
+        "open":  [96.0, 97.0, 98.0, 99.0, 99.5, 100.2, 100.4, 100.1, 100.1],
+        "high":  [97.0, 98.0, 99.0, 99.85, 99.7, 100.6, 100.5, 100.2, 100.4],
+        "low":   [95.5, 96.5, 97.5, 98.4, 98.8, 99.7, 99.9, 99.7, 99.8],
+        "close": [96.8, 97.8, 98.8, 99.2, 99.1, 100.3, 100.2, 99.9, 100.2],
+    })
+
+
 def make_open_levels_w_reclaimed_m_not_reached_case():
     """VVV-like: W/D are already reclaimed, while M is still too far above price."""
     timestamps = pd.date_range("2026-06-15 00:00:00", periods=8, freq="1h")
@@ -5935,6 +6154,28 @@ def run_rejection_self_tests():
                 df_4h=make_open_levels_month_reclaimed_case(),
                 df_1d=make_open_levels_month_only_1d_case(),
                 current_price=101.5,
+            ),
+            "not_confirmed",
+            "none",
+        ),
+        (
+            "BANANAS-like old M rejection invalid after later closes above M",
+            detect_rejection_candle(
+                df_1h=make_open_levels_old_month_rejection_then_closed_above_case(),
+                df_4h=make_open_levels_far_below_month_case(),
+                df_1d=make_open_levels_month_only_1d_case(),
+                current_price=99.4,
+            ),
+            "not_confirmed",
+            "none",
+        ),
+        (
+            "USELESS-like near M rejection invalid after later reclaim",
+            detect_rejection_candle(
+                df_1h=make_open_levels_useless_like_case(),
+                df_4h=make_open_levels_far_below_month_case(),
+                df_1d=make_open_levels_month_only_1d_case(),
+                current_price=99.4,
             ),
             "not_confirmed",
             "none",
