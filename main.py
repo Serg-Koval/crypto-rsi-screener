@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r24"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r25"
 
 RSI_PERIOD = 14
 
@@ -85,9 +85,9 @@ LOCAL_HIGH_RECENT_WINDOW_BARS = 6
 # Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
 OPEN_LEVEL_NEAR_THRESHOLDS = {
     "D": 0.0015,   # 0.15% below daily open
-    "W": 0.0020,   # 0.20% below weekly open
-    "M": 0.0025,   # 0.25% below monthly open
-    "Y": 0.0025,   # 0.25% below yearly open
+    "W": 0.0035,   # 0.35% below weekly open
+    "M": 0.0050,   # 0.50% below monthly open
+    "Y": 0.0050,   # 0.50% below yearly open
 }
 # If price has reclaimed an open level, that level is no longer active resistance.
 # This prevents old D/W/M/Y tests from being reported after price has already moved above the level.
@@ -1602,9 +1602,10 @@ def normalize_intraday_candles_for_open_levels(df):
     """Return clean intraday candles with UTC and Kyiv timestamps.
 
     Exchange candles are normalized as UTC timestamps in the dataframe.
-    TradingView open-level drawings in the user's screenshots are aligned to
-    Kyiv chart time, so r23 calculates D/W/M opens from intraday candles after
-    converting timestamps to Europe/Kyiv.
+    r25 uses intraday UTC period starts for D/W/M/Y opens because the
+    TradingView open-level drawings shown in validation screenshots match
+    exchange/TradingView UTC session opens better than OKX 1D candles or
+    Kyiv-local period starts.
     """
 
     if df is None or df.empty:
@@ -1712,12 +1713,11 @@ def get_kyiv_period_start(reference_kyiv, period_label):
 
 
 def calculate_open_levels_from_intraday(df_1h):
-    """Return D/W/M/Y open levels from 1H candles aligned to Kyiv time.
+    """Return D/W/M/Y open levels from 1H candles aligned to UTC starts.
 
-    r23 fixes the main source of repeated M/W/Y false positives: 1D exchange
-    candles use UTC day boundaries, while the user's TradingView open-level
-    layout is aligned to Kyiv time. We therefore prefer the exact first 1H
-    candle of the Kyiv day/week/month/year when it is available.
+    Do not use OKX 1D candles for these levels when 1H data is available: OKX
+    daily candles can use exchange-specific session boundaries that do not
+    match the TradingView D/W/M/Y open lines used for visual validation.
     """
 
     df = normalize_intraday_candles_for_open_levels(df_1h)
@@ -1725,22 +1725,28 @@ def calculate_open_levels_from_intraday(df_1h):
     if df.empty:
         return {}
 
-    reference_kyiv = df.iloc[-1]["timestamp_kyiv"]
+    reference_utc = df.iloc[-1]["timestamp_utc"]
     levels = {}
+    timestamps_utc = pd.to_datetime(df["timestamp_utc"], errors="coerce")
 
     for label in ["D", "W", "M", "Y"]:
-        start_kyiv = get_kyiv_period_start(reference_kyiv, label)
+        start_utc = get_period_start(reference_utc, label)
 
-        if start_kyiv is None:
+        if start_utc is None:
             continue
 
-        timestamps_kyiv = pd.to_datetime(df["timestamp_kyiv"], errors="coerce")
-        exact_match = df[timestamps_kyiv == start_kyiv]
+        exact_match = df[timestamps_utc == start_utc]
 
+        # Use the exact UTC period-start candle only. If it is unavailable,
+        # fall back to 1D for that level rather than using the first visible
+        # intraday candle, because that would create a false M/W/Y open from
+        # the middle of the period.
         if exact_match.empty:
             continue
 
         first_row = exact_match.iloc[0]
+        source = "1H_UTC"
+
         open_price = safe_float(first_row.get("open"), default=np.nan)
 
         if open_price is None or pd.isna(open_price) or float(open_price) <= 0:
@@ -1752,17 +1758,16 @@ def calculate_open_levels_from_intraday(df_1h):
             "source_time": first_row.get("timestamp"),
             "source_time_utc": first_row.get("timestamp_utc"),
             "source_time_kyiv": first_row.get("timestamp_kyiv"),
-            "source": "1H_Kyiv",
+            "source": source,
         }
 
     return levels
 
-
 def calculate_open_levels(df_1d=None, df_1h=None):
-    """Return D/W/M/Y open levels, preferring 1H Kyiv-time opens.
+    """Return D/W/M/Y open levels, preferring 1H UTC session opens.
 
     If the needed intraday start candle is unavailable, fall back to the legacy
-    1D UTC calculation for that specific level. The debug output keeps both the
+    1D calculation for that specific level. The debug output keeps both the
     selected level and its source so mismatches can be checked in GitHub logs.
     """
 
@@ -1880,8 +1885,33 @@ def event_confirm_time(event):
         return None
 
 
-def closed_candle_reclaimed_level_after_event(df, level_price, event, same_timeframe=False):
-    """Return True if a closed candle after the event reclaimed the open level."""
+
+def timeframe_to_timedelta(timeframe):
+    if str(timeframe).upper() == "4H":
+        return pd.Timedelta(hours=4)
+
+    return pd.Timedelta(hours=1)
+
+
+def get_candle_close_time_value(candle, timeframe):
+    start_time = get_candle_timestamp_value(candle)
+
+    if start_time is None:
+        return None
+
+    try:
+        return pd.to_datetime(start_time) + timeframe_to_timedelta(timeframe)
+    except Exception:
+        return pd.to_datetime(start_time)
+
+
+def closed_candle_reclaimed_level_after_event(df, level_price, event, same_timeframe=False, df_timeframe="1H"):
+    """Return True if a closed candle after the event reclaimed the open level.
+
+    Event timestamps are confirmation/close times, not candle open times. This
+    matters for 4H rejection: 1H candles inside the same 4H candle must not
+    invalidate the 4H event before that 4H candle has actually closed.
+    """
 
     if df is None or df.empty or event is None or level_price is None:
         return False
@@ -1902,7 +1932,7 @@ def closed_candle_reclaimed_level_after_event(df, level_price, event, same_timef
         include_candle = False
 
         if event_time is not None and "timestamp" in candle.index:
-            candle_time = get_candle_timestamp_value(candle)
+            candle_time = get_candle_close_time_value(candle, df_timeframe)
 
             if candle_time is not None:
                 include_candle = pd.to_datetime(candle_time) > event_time
@@ -1959,10 +1989,10 @@ def open_level_event_is_active_resistance(event, level_price, current_price=None
 
     event_tf = str((event or {}).get("confirm_tf", ""))
 
-    if closed_candle_reclaimed_level_after_event(df_1h, level_price, event, same_timeframe=(event_tf == "1H")):
+    if closed_candle_reclaimed_level_after_event(df_1h, level_price, event, same_timeframe=(event_tf == "1H"), df_timeframe="1H"):
         return False
 
-    if closed_candle_reclaimed_level_after_event(df_4h, level_price, event, same_timeframe=(event_tf == "4H")):
+    if closed_candle_reclaimed_level_after_event(df_4h, level_price, event, same_timeframe=(event_tf == "4H"), df_timeframe="4H"):
         return False
 
     return True
@@ -2143,7 +2173,9 @@ def build_open_test_event(label, level_price, confirm_candle, confirm_index, win
         event["confirm_high"] = safe_float(confirm_candle.get("high"), default=np.nan)
         event["confirm_close"] = safe_float(confirm_candle.get("close"), default=np.nan)
         if "timestamp" in confirm_candle:
-            event["confirm_time"] = str(confirm_candle.get("timestamp"))
+            event["confirm_start_time"] = str(confirm_candle.get("timestamp"))
+            close_time = get_candle_close_time_value(confirm_candle, window_tf)
+            event["confirm_time"] = str(close_time if close_time is not None else confirm_candle.get("timestamp"))
 
     return event
 
@@ -2165,6 +2197,7 @@ def build_open_live_event(label, state, level_price, live_candle, live_index, wi
         event["confirm_high"] = safe_float(live_candle.get("high"), default=np.nan)
         event["confirm_close"] = safe_float(live_candle.get("close"), default=np.nan)
         if "timestamp" in live_candle:
+            event["confirm_start_time"] = str(live_candle.get("timestamp"))
             event["confirm_time"] = str(live_candle.get("timestamp"))
 
     return event
@@ -2764,7 +2797,9 @@ def build_rejection_event(label, state, level_price, candle, candle_index, windo
     }
 
     if "timestamp" in candle:
-        event["confirm_time"] = str(candle.get("timestamp"))
+        event["confirm_start_time"] = str(candle.get("timestamp"))
+        close_time = get_candle_close_time_value(candle, window_tf)
+        event["confirm_time"] = str(close_time if close_time is not None else candle.get("timestamp"))
 
     return event
 
@@ -5622,8 +5657,9 @@ def make_open_levels_1h_near_d_rejection_case():
     timestamps = pd.date_range("2026-06-11 00:00:00", periods=8, freq="1h")
     df = pd.DataFrame({
         "timestamp": timestamps,
-        "open": [91.0, 91.5, 92.0, 92.5, 93.0, 93.4, 93.8, 93.3],
-        "high": [91.6, 92.1, 92.6, 93.0, 93.4, 93.7, 93.90, 93.5],
+        # First 1H candle defines the UTC D open used by r25.
+        "open": [94.0, 91.5, 92.0, 92.5, 93.0, 93.4, 93.8, 93.3],
+        "high": [94.2, 92.1, 92.6, 93.0, 93.4, 93.7, 93.90, 93.5],
         "low": [90.8, 91.2, 91.7, 92.2, 92.7, 93.0, 93.1, 93.0],
         "close": [91.4, 91.9, 92.4, 92.8, 93.2, 93.5, 93.25, 93.2],
     })
