@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r29"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r31"
 
 RSI_PERIOD = 14
 
@@ -1819,6 +1819,33 @@ def calculate_open_levels(df_1d=None, df_1h=None, df_4h=None):
     return levels
 
 
+
+
+def open_level_source_is_allowed_for_signal(label, level):
+    """Return True when an open level source is reliable enough for Telegram signals.
+
+    Intraday exact-start levels are preferred. 1D fallback can differ from the
+    TradingView levels used for visual validation, especially for W/M/Y. To avoid
+    false open-level rejection signals, W/M/Y levels from 1D fallback are kept
+    in debug but are not allowed to create Open Levels / Rejection signals.
+    """
+
+    if not level or not isinstance(level, dict):
+        return False
+
+    source = str(level.get("source", ""))
+    label = str(label)
+
+    # Y open from 1D fallback has repeatedly mismatched TradingView/open-level
+    # validation. Keep it in debug, but do not let it create active signals.
+    # W/M remain allowed as fallback for now, because r26+r30 usually select
+    # exact intraday W/M; blocking them would remove too many valid legacy tests.
+    if label == "Y" and source == "1D_UTC_fallback":
+        return False
+
+    return True
+
+
 def get_previous_candle(df, candle_index):
     if df is None or df.empty or candle_index is None:
         return None
@@ -2557,6 +2584,9 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         if not level:
             continue
 
+        if not open_level_source_is_allowed_for_signal(label, level):
+            continue
+
         level_price = level.get("open")
         candidate_events = []
 
@@ -3007,6 +3037,9 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     for label in ["D", "W", "M", "Y"]:
         level = levels.get(label)
         if not level:
+            continue
+
+        if not open_level_source_is_allowed_for_signal(label, level):
             continue
 
         level_price = level.get("open")
@@ -3722,10 +3755,27 @@ def extract_oi_value_from_row(row):
         "amount",
         "value",
         "size",
-        "openInterestList",
     ]
 
     if isinstance(row, dict):
+        # Bitget current OI response nests the actual value inside
+        # data.openInterestList[0].size. Parse nested lists first instead of
+        # trying to cast the whole list to float.
+        nested_list = row.get("openInterestList")
+        if isinstance(nested_list, list):
+            for nested_item in nested_list:
+                nested_value = extract_oi_value_from_row(nested_item)
+                if nested_value is not None:
+                    return nested_value
+
+        # Some wrappers return a generic data list with OI rows.
+        nested_data = row.get("data")
+        if isinstance(nested_data, list):
+            for nested_item in nested_data:
+                nested_value = extract_oi_value_from_row(nested_item)
+                if nested_value is not None:
+                    return nested_value
+
         for key in preferred_keys:
             if key in row:
                 value = safe_float(row.get(key), default=np.nan)
@@ -3735,6 +3785,11 @@ def extract_oi_value_from_row(row):
         for key, raw_value in row.items():
             if str(key).lower() in {"ts", "timestamp", "time", "date"}:
                 continue
+            if isinstance(raw_value, (dict, list, tuple)):
+                nested_value = extract_oi_value_from_row(raw_value)
+                if nested_value is not None:
+                    return nested_value
+                continue
             value = safe_float(raw_value, default=np.nan)
             if not pd.isna(value) and float(value) > 0 and float(value) < 10**18:
                 return float(value)
@@ -3743,6 +3798,11 @@ def extract_oi_value_from_row(row):
 
     if isinstance(row, (list, tuple)):
         for raw_value in list(row)[1:]:
+            if isinstance(raw_value, (dict, list, tuple)):
+                nested_value = extract_oi_value_from_row(raw_value)
+                if nested_value is not None:
+                    return nested_value
+                continue
             value = safe_float(raw_value, default=np.nan)
             if not pd.isna(value) and float(value) > 0 and float(value) < 10**18:
                 return float(value)
@@ -4602,8 +4662,10 @@ def bitget_get_open_interest(symbol):
 
 
 def bitget_get_open_interest_metrics(symbol):
-    # Bitget v2 currently gives public current OI here. r28 keeps this
-    # non-blocking; change values are N/A until a stable historical source is added.
+    # Bitget public Futures API exposes current OI. The official v2 Futures
+    # market docs do not provide a per-symbol historical OI endpoint equivalent
+    # to OKX Rubik history, so 1H/4H changes remain N/A until we add persistent
+    # snapshots or a separate approved historical data source.
     try:
         current_oi = bitget_get_open_interest(symbol)
     except Exception as e:
@@ -4613,7 +4675,7 @@ def bitget_get_open_interest_metrics(symbol):
     return build_open_interest_metrics(
         history_df=pd.DataFrame(columns=["timestamp", "open_interest"]),
         current_oi=current_oi,
-        provider="Bitget",
+        provider="Bitget_current",
     )
 
 
@@ -7120,6 +7182,16 @@ def run_open_interest_self_tests():
             "oi_change_4h_percent": None,
             "oi_context": "N/A",
         }) == "OI: current 3.29M | history N/A",
+    ))
+    bitget_sample = {
+        "openInterestList": [
+            {"symbol": "BTCUSDT", "size": "34278.06"},
+        ],
+        "ts": "1695796781616",
+    }
+    tests.append((
+        "bitget_nested_current_oi",
+        abs(extract_oi_value_from_row(bitget_sample) - 34278.06) < 0.0001,
     ))
 
     history = pd.DataFrame([
