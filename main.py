@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r28"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r29"
 
 RSI_PERIOD = 14
 
@@ -111,6 +111,7 @@ REJECTION_MAX_CLOSE_POSITION_PCT = 0.55
 # Open Interest context layer (r28).
 # Context only: it is shown in Telegram but does not affect scoring yet.
 OI_HISTORY_PERIOD = "1H"
+OI_HISTORY_LOOKBACK_HOURS = 12
 OI_CHANGE_FLAT_THRESHOLD_PCT = 2.0
 OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT = 3.0
 OI_CHANGE_4H_ACTIVE_THRESHOLD_PCT = 5.0
@@ -3774,47 +3775,92 @@ def normalize_oi_history_rows(rows):
     return df
 
 
+def get_history_value_at_or_before(history, target_timestamp):
+    if history is None or history.empty or target_timestamp is None:
+        return np.nan
+
+    try:
+        timestamps = pd.to_datetime(history["timestamp"], errors="coerce")
+        target = pd.to_datetime(target_timestamp)
+        eligible = history[timestamps <= target]
+
+        if eligible.empty:
+            return np.nan
+
+        return safe_float(eligible.iloc[-1].get("open_interest"), default=np.nan)
+    except Exception:
+        return np.nan
+
+
 def build_open_interest_metrics(history_df=None, current_oi=None, provider="provider"):
+    """
+    Build Open Interest metrics.
+
+    Important: current OI and historical Rubik OI can use different units/scales
+    depending on endpoint. For percentage changes, use the historical series only
+    when it is available. Current OI is kept as informational fallback/display.
+    """
+
     history = history_df.copy() if isinstance(history_df, pd.DataFrame) else pd.DataFrame()
 
     if not history.empty:
+        history["timestamp"] = pd.to_datetime(history["timestamp"], errors="coerce")
         history["open_interest"] = pd.to_numeric(history["open_interest"], errors="coerce")
-        history = history.dropna(subset=["open_interest"])
-        history = history[history["open_interest"] > 0].reset_index(drop=True)
+        history = history.dropna(subset=["timestamp", "open_interest"])
+        history = history[history["open_interest"] > 0]
+        history = history.sort_values("timestamp").reset_index(drop=True)
 
     current_value = safe_float(current_oi, default=np.nan)
+    has_current_value = not pd.isna(current_value) and float(current_value) > 0
 
-    if not pd.isna(current_value) and float(current_value) > 0:
-        if history.empty or abs(float(history.iloc[-1]["open_interest"]) - float(current_value)) > 1e-12:
-            now_ts = pd.Timestamp.utcnow().tz_localize(None)
-            current_row = pd.DataFrame([{"timestamp": now_ts, "open_interest": float(current_value)}])
-            history = pd.concat([history, current_row], ignore_index=True)
+    history_points = int(len(history)) if isinstance(history, pd.DataFrame) else 0
+    history_latest_ts = None
 
-    if history.empty:
+    if not history.empty:
+        latest_ts = pd.to_datetime(history.iloc[-1]["timestamp"])
+        history_latest_ts = latest_ts
+        history_current = float(history.iloc[-1]["open_interest"])
+        previous_1h = get_history_value_at_or_before(history, latest_ts - pd.Timedelta(hours=1))
+        previous_4h = get_history_value_at_or_before(history, latest_ts - pd.Timedelta(hours=4))
+
+        change_1h = percent_change_from_values(history_current, previous_1h)
+        change_4h = percent_change_from_values(history_current, previous_4h)
+
         return {
-            "oi_status": "not_available",
-            "oi_current": None,
+            "oi_status": "ok",
+            "oi_current": float(current_value) if has_current_value else history_current,
+            "oi_history_current": history_current,
+            "oi_change_1h_percent": change_1h,
+            "oi_change_4h_percent": change_4h,
+            "oi_context": interpret_open_interest_context(change_1h, change_4h),
+            "oi_source": str(provider),
+            "oi_history_points": history_points,
+            "oi_history_latest_ts": history_latest_ts,
+        }
+
+    if has_current_value:
+        return {
+            "oi_status": "current_only",
+            "oi_current": float(current_value),
+            "oi_history_current": None,
             "oi_change_1h_percent": None,
             "oi_change_4h_percent": None,
             "oi_context": "N/A",
             "oi_source": str(provider),
+            "oi_history_points": 0,
+            "oi_history_latest_ts": None,
         }
 
-    history = history.sort_values("timestamp").reset_index(drop=True)
-    current = float(history.iloc[-1]["open_interest"])
-    previous_1h = float(history.iloc[-2]["open_interest"]) if len(history) >= 2 else np.nan
-    previous_4h = float(history.iloc[-5]["open_interest"]) if len(history) >= 5 else np.nan
-
-    change_1h = percent_change_from_values(current, previous_1h)
-    change_4h = percent_change_from_values(current, previous_4h)
-
     return {
-        "oi_status": "ok",
-        "oi_current": current,
-        "oi_change_1h_percent": change_1h,
-        "oi_change_4h_percent": change_4h,
-        "oi_context": interpret_open_interest_context(change_1h, change_4h),
+        "oi_status": "not_available",
+        "oi_current": None,
+        "oi_history_current": None,
+        "oi_change_1h_percent": None,
+        "oi_change_4h_percent": None,
+        "oi_context": "N/A",
         "oi_source": str(provider),
+        "oi_history_points": 0,
+        "oi_history_latest_ts": None,
     }
 
 
@@ -3870,11 +3916,15 @@ def format_oi_line_for_telegram(detail):
 
     change_1h = detail.get("oi_change_1h_percent")
     change_4h = detail.get("oi_change_4h_percent")
+    current_oi = detail.get("oi_current")
 
     has_1h = change_1h is not None and not pd.isna(safe_float(change_1h, default=np.nan))
     has_4h = change_4h is not None and not pd.isna(safe_float(change_4h, default=np.nan))
+    has_current = current_oi is not None and not pd.isna(safe_float(current_oi, default=np.nan))
 
     if not has_1h and not has_4h:
+        if has_current:
+            return f"OI: current {format_large_number(current_oi)} | history N/A"
         return ""
 
     context = str(detail.get("oi_context", "N/A") or "N/A")
@@ -4006,12 +4056,20 @@ def okx_get_open_interest_history(inst_id, period=OI_HISTORY_PERIOD):
     if not base_ccy:
         return pd.DataFrame(columns=["timestamp", "open_interest"])
 
+    now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
+    begin_ms = now_ms - int(OI_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1000)
+
+    # OKX historical contract OI is exposed through the Trading Data
+    # "open-interest-volume" endpoint. r28 used a history endpoint that returned
+    # current OI but not enough usable rows for 1H/4H changes in production.
     data = safe_get_json(
         base_url=OKX_BASE_URL,
-        endpoint="/api/v5/rubik/stat/contracts/open-interest-history",
+        endpoint="/api/v5/rubik/stat/contracts/open-interest-volume",
         params={
             "ccy": base_ccy,
             "period": period,
+            "begin": str(begin_ms),
+            "end": str(now_ms),
         },
         provider_name="OKX OI history",
     )
@@ -4240,6 +4298,8 @@ def okx_analyze_candidate(inst_id, ticker_row):
         "oi_context": oi_metrics.get("oi_context", "N/A"),
         "oi_status": oi_metrics.get("oi_status", "not_available"),
         "oi_source": oi_metrics.get("oi_source", "OKX"),
+        "oi_history_points": oi_metrics.get("oi_history_points", 0),
+        "oi_history_latest_ts": oi_metrics.get("oi_history_latest_ts"),
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
         "pump_score": classification["pump_score"],
@@ -4656,6 +4716,8 @@ def bitget_analyze_candidate(symbol, ticker_row):
         "oi_context": oi_metrics.get("oi_context", "N/A"),
         "oi_status": oi_metrics.get("oi_status", "not_available"),
         "oi_source": oi_metrics.get("oi_source", "Bitget"),
+        "oi_history_points": oi_metrics.get("oi_history_points", 0),
+        "oi_history_latest_ts": oi_metrics.get("oi_history_latest_ts"),
         "signal_level": classification["signal_level"],
         "reason": classification["reason"],
         "pump_score": classification["pump_score"],
@@ -4934,6 +4996,8 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
                 "oi_context": str(row.get("oi_context", "N/A")),
                 "oi_status": str(row.get("oi_status", "not_available")),
                 "oi_source": str(row.get("oi_source", row.get("exchange", "N/A"))),
+                "oi_history_points": row.get("oi_history_points", 0),
+                "oi_history_latest_ts": row.get("oi_history_latest_ts"),
                 "pump_score": int(row.get("pump_score", 0)),
                 "rsi_score": int(row.get("rsi_score", 0)),
                 "volume_score": int(row.get("volume_score", 0)),
@@ -5412,6 +5476,8 @@ def log_oi_debug_for_grouped_signals(grouped_signals):
             f"change_1h={format_debug_value(detail.get('oi_change_1h_percent'))}",
             f"change_4h={format_debug_value(detail.get('oi_change_4h_percent'))}",
             f"context={format_debug_value(detail.get('oi_context'))}",
+            f"history_points={format_debug_value(detail.get('oi_history_points'))}",
+            f"history_latest={format_debug_value(detail.get('oi_history_latest_ts'))}",
         ]
         print(" ".join(fields))
 
@@ -7045,6 +7111,32 @@ def run_open_interest_self_tests():
             "oi_change_4h_percent": 21.74,
             "oi_context": "Long build-up",
         }) == "OI: 1H +8.4% | 4H +21.7% | Long build-up",
+    ))
+    tests.append((
+        "format_current_only_line",
+        format_oi_line_for_telegram({
+            "oi_current": 3293570,
+            "oi_change_1h_percent": None,
+            "oi_change_4h_percent": None,
+            "oi_context": "N/A",
+        }) == "OI: current 3.29M | history N/A",
+    ))
+
+    history = pd.DataFrame([
+        {"timestamp": pd.Timestamp("2026-06-15 10:00:00"), "open_interest": 100.0},
+        {"timestamp": pd.Timestamp("2026-06-15 11:00:00"), "open_interest": 110.0},
+        {"timestamp": pd.Timestamp("2026-06-15 12:00:00"), "open_interest": 121.0},
+        {"timestamp": pd.Timestamp("2026-06-15 13:00:00"), "open_interest": 130.0},
+        {"timestamp": pd.Timestamp("2026-06-15 14:00:00"), "open_interest": 150.0},
+    ])
+    metrics = build_open_interest_metrics(history_df=history, current_oi=999999.0, provider="TEST")
+    tests.append((
+        "history_change_1h",
+        metrics.get("oi_change_1h_percent") is not None and abs(metrics.get("oi_change_1h_percent") - 15.3846153846) < 0.0001,
+    ))
+    tests.append((
+        "history_change_4h",
+        metrics.get("oi_change_4h_percent") is not None and abs(metrics.get("oi_change_4h_percent") - 50.0) < 0.0001,
     ))
 
     failed = 0
