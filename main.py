@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r22"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r23"
 
 RSI_PERIOD = 14
 
@@ -1598,6 +1598,44 @@ def normalize_daily_candles(df_1d):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+def normalize_intraday_candles_for_open_levels(df):
+    """Return clean intraday candles with UTC and Kyiv timestamps.
+
+    Exchange candles are normalized as UTC timestamps in the dataframe.
+    TradingView open-level drawings in the user's screenshots are aligned to
+    Kyiv chart time, so r23 calculates D/W/M opens from intraday candles after
+    converting timestamps to Europe/Kyiv.
+    """
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if "timestamp" not in df.columns or "open" not in df.columns:
+        return pd.DataFrame()
+
+    work_df = df.copy().reset_index(drop=True)
+    timestamps = pd.to_datetime(work_df["timestamp"], errors="coerce")
+
+    try:
+        # OKX/Bitget timestamps are UTC but stored as timezone-naive values.
+        if timestamps.dt.tz is None:
+            timestamps_utc = timestamps.dt.tz_localize("UTC")
+        else:
+            timestamps_utc = timestamps.dt.tz_convert("UTC")
+    except Exception:
+        return pd.DataFrame()
+
+    work_df["timestamp_utc"] = timestamps_utc
+    work_df["timestamp_kyiv"] = timestamps_utc.dt.tz_convert(KYIV_TZ)
+    work_df["open"] = pd.to_numeric(work_df["open"], errors="coerce")
+    work_df = work_df.dropna(subset=["timestamp_utc", "timestamp_kyiv", "open"])
+
+    if work_df.empty:
+        return work_df
+
+    return work_df.sort_values("timestamp_utc").reset_index(drop=True)
+
+
 def get_period_start(timestamp, period_label):
     ts = pd.to_datetime(timestamp)
 
@@ -1616,15 +1654,8 @@ def get_period_start(timestamp, period_label):
     return None
 
 
-def calculate_open_levels(df_1d):
-    """
-    Return D/W/M/Y open levels from 1D candles.
-
-    The latest 1D candle is used as the current day context. W/M/Y opens are
-    taken from the first available 1D candle inside the current week/month/year.
-    If the instrument was listed after the period start, the first available
-    candle inside that period is used.
-    """
+def calculate_open_levels_from_daily(df_1d):
+    """Legacy fallback: return D/W/M/Y open levels from 1D UTC candles."""
 
     df = normalize_daily_candles(df_1d)
 
@@ -1656,7 +1687,105 @@ def calculate_open_levels(df_1d):
             "label": label,
             "open": float(open_price),
             "source_time": first_row.get("timestamp"),
+            "source": "1D_UTC_fallback",
         }
+
+    return levels
+
+
+def get_kyiv_period_start(reference_kyiv, period_label):
+    ts = pd.to_datetime(reference_kyiv)
+
+    if period_label == "D":
+        return ts.normalize()
+
+    if period_label == "W":
+        return (ts - pd.Timedelta(days=int(ts.weekday()))).normalize()
+
+    if period_label == "M":
+        return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    if period_label == "Y":
+        return ts.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    return None
+
+
+def calculate_open_levels_from_intraday(df_1h):
+    """Return D/W/M/Y open levels from 1H candles aligned to Kyiv time.
+
+    r23 fixes the main source of repeated M/W/Y false positives: 1D exchange
+    candles use UTC day boundaries, while the user's TradingView open-level
+    layout is aligned to Kyiv time. We therefore prefer the exact first 1H
+    candle of the Kyiv day/week/month/year when it is available.
+    """
+
+    df = normalize_intraday_candles_for_open_levels(df_1h)
+
+    if df.empty:
+        return {}
+
+    reference_kyiv = df.iloc[-1]["timestamp_kyiv"]
+    levels = {}
+
+    for label in ["D", "W", "M", "Y"]:
+        start_kyiv = get_kyiv_period_start(reference_kyiv, label)
+
+        if start_kyiv is None:
+            continue
+
+        timestamps_kyiv = pd.to_datetime(df["timestamp_kyiv"], errors="coerce")
+        exact_match = df[timestamps_kyiv == start_kyiv]
+
+        if exact_match.empty:
+            continue
+
+        first_row = exact_match.iloc[0]
+        open_price = safe_float(first_row.get("open"), default=np.nan)
+
+        if open_price is None or pd.isna(open_price) or float(open_price) <= 0:
+            continue
+
+        levels[label] = {
+            "label": label,
+            "open": float(open_price),
+            "source_time": first_row.get("timestamp"),
+            "source_time_utc": first_row.get("timestamp_utc"),
+            "source_time_kyiv": first_row.get("timestamp_kyiv"),
+            "source": "1H_Kyiv",
+        }
+
+    return levels
+
+
+def calculate_open_levels(df_1d=None, df_1h=None):
+    """Return D/W/M/Y open levels, preferring 1H Kyiv-time opens.
+
+    If the needed intraday start candle is unavailable, fall back to the legacy
+    1D UTC calculation for that specific level. The debug output keeps both the
+    selected level and its source so mismatches can be checked in GitHub logs.
+    """
+
+    intraday_levels = calculate_open_levels_from_intraday(df_1h)
+    daily_levels = calculate_open_levels_from_daily(df_1d)
+    levels = {}
+
+    for label in ["D", "W", "M", "Y"]:
+        if label in intraday_levels:
+            levels[label] = intraday_levels[label]
+        elif label in daily_levels:
+            levels[label] = daily_levels[label]
+
+    if not any(label in levels for label in ["D", "W", "M", "Y"]):
+        return {}
+
+    # Attach reference dictionaries for debug without changing the selected
+    # level format used by the factor code.
+    levels["_debug"] = {
+        "intraday": {label: item.get("open") for label, item in intraday_levels.items()},
+        "daily": {label: item.get("open") for label, item in daily_levels.items()},
+        "source": {label: item.get("source") for label, item in levels.items() if isinstance(item, dict)},
+    }
 
     return levels
 
@@ -2241,7 +2370,7 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     themselves.
     """
 
-    levels = calculate_open_levels(df_1d)
+    levels = calculate_open_levels(df_1d=df_1d, df_1h=df_1h)
 
     if not levels:
         return make_factor(
@@ -2341,6 +2470,10 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         for label, level in levels.items()
         if isinstance(level, dict) and level.get("open") is not None
     }
+    levels_debug_meta = levels.get("_debug", {}) if isinstance(levels, dict) else {}
+    debug_levels_source = levels_debug_meta.get("source", {}) if isinstance(levels_debug_meta, dict) else {}
+    debug_levels_intraday = levels_debug_meta.get("intraday", {}) if isinstance(levels_debug_meta, dict) else {}
+    debug_levels_daily = levels_debug_meta.get("daily", {}) if isinstance(levels_debug_meta, dict) else {}
 
     window_debug = {
         "D_window_tf": "1H",
@@ -2362,6 +2495,9 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
         factor["debug"] = {
             "status": "not_confirmed",
             "levels": debug_levels,
+            "levels_source": debug_levels_source,
+            "levels_intraday": debug_levels_intraday,
+            "levels_daily": debug_levels_daily,
             "events": [],
             "score": 0.0,
             "reason": "no_open_resistance_nearby",
@@ -2384,6 +2520,9 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     factor["debug"] = {
         "status": "confirmed",
         "levels": debug_levels,
+        "levels_source": debug_levels_source,
+        "levels_intraday": debug_levels_intraday,
+        "levels_daily": debug_levels_daily,
         "events": events,
         "score": float(context_score),
         "reason": detail,
@@ -2634,7 +2773,7 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     Live candles never confirm rejection. They can only be open-level context.
     """
 
-    levels = calculate_open_levels(df_1d)
+    levels = calculate_open_levels(df_1d=df_1d, df_1h=df_1h)
 
     if not levels:
         factor = make_factor(
@@ -2758,6 +2897,10 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
         for label, level in levels.items()
         if isinstance(level, dict) and level.get("open") is not None
     }
+    levels_debug_meta = levels.get("_debug", {}) if isinstance(levels, dict) else {}
+    debug_levels_source = levels_debug_meta.get("source", {}) if isinstance(levels_debug_meta, dict) else {}
+    debug_levels_intraday = levels_debug_meta.get("intraday", {}) if isinstance(levels_debug_meta, dict) else {}
+    debug_levels_daily = levels_debug_meta.get("daily", {}) if isinstance(levels_debug_meta, dict) else {}
 
     if not events:
         factor = make_factor(
@@ -2771,6 +2914,9 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
         factor["debug"] = {
             "status": "not_confirmed",
             "levels": debug_levels,
+            "levels_source": debug_levels_source,
+            "levels_intraday": debug_levels_intraday,
+            "levels_daily": debug_levels_daily,
             "events": [],
             "reason": "no_open_level_rejection",
         }
@@ -2791,6 +2937,9 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     factor["debug"] = {
         "status": "confirmed",
         "levels": debug_levels,
+        "levels_source": debug_levels_source,
+        "levels_intraday": debug_levels_intraday,
+        "levels_daily": debug_levels_daily,
         "events": events,
         "reason": detail,
     }
@@ -4825,6 +4974,30 @@ def log_open_levels_debug_for_grouped_signals(grouped_signals):
             if label in levels:
                 level_parts.append(f"{label}={format_debug_value(levels.get(label))}")
 
+        sources = debug.get("levels_source") if isinstance(debug, dict) else {}
+        if not isinstance(sources, dict):
+            sources = {}
+        source_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in sources:
+                source_parts.append(f"{label}={format_debug_value(sources.get(label))}")
+
+        intraday_levels = debug.get("levels_intraday") if isinstance(debug, dict) else {}
+        if not isinstance(intraday_levels, dict):
+            intraday_levels = {}
+        intraday_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in intraday_levels:
+                intraday_parts.append(f"{label}={format_debug_value(intraday_levels.get(label))}")
+
+        daily_levels = debug.get("levels_daily") if isinstance(debug, dict) else {}
+        if not isinstance(daily_levels, dict):
+            daily_levels = {}
+        daily_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in daily_levels:
+                daily_parts.append(f"{label}={format_debug_value(daily_levels.get(label))}")
+
         fields = [
             "OPEN_LEVELS_DEBUG",
             f"symbol={format_debug_value(group.get('symbol'))}",
@@ -4834,6 +5007,9 @@ def log_open_levels_debug_for_grouped_signals(grouped_signals):
             f"score={format_debug_value(open_factor.get('open_context_score', 0.0))}",
             f"events={format_debug_value('|'.join(event_parts) if event_parts else 'none')}",
             f"levels={format_debug_value('|'.join(level_parts) if level_parts else 'none')}",
+            f"levels_source={format_debug_value('|'.join(source_parts) if source_parts else 'none')}",
+            f"levels_1h_kyiv={format_debug_value('|'.join(intraday_parts) if intraday_parts else 'none')}",
+            f"levels_1d_utc={format_debug_value('|'.join(daily_parts) if daily_parts else 'none')}",
             f"D_window={format_debug_value(debug.get('D_window_tf'))}:{format_debug_value(debug.get('D_window_bars'))}",
             f"HTF_window={format_debug_value(debug.get('HTF_window_tf'))}:{format_debug_value(debug.get('HTF_window_bars'))}",
             f"detail={format_debug_value(open_factor.get('detail'))}",
@@ -4879,6 +5055,26 @@ def log_rejection_debug_for_grouped_signals(grouped_signals):
                 ])
             )
 
+        debug = factor.get("debug") if isinstance(factor, dict) else {}
+        if not isinstance(debug, dict):
+            debug = {}
+
+        levels = debug.get("levels") if isinstance(debug, dict) else {}
+        if not isinstance(levels, dict):
+            levels = {}
+        level_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in levels:
+                level_parts.append(f"{label}={format_debug_value(levels.get(label))}")
+
+        sources = debug.get("levels_source") if isinstance(debug, dict) else {}
+        if not isinstance(sources, dict):
+            sources = {}
+        source_parts = []
+        for label in ["D", "W", "M", "Y"]:
+            if label in sources:
+                source_parts.append(f"{label}={format_debug_value(sources.get(label))}")
+
         fields = [
             "REJECTION_DEBUG",
             f"symbol={format_debug_value(group.get('symbol'))}",
@@ -4887,6 +5083,8 @@ def log_rejection_debug_for_grouped_signals(grouped_signals):
             f"status={format_debug_value(factor.get('status'))}",
             f"detail={format_debug_value(factor.get('detail'))}",
             f"events={format_debug_value('|'.join(event_parts) if event_parts else 'none')}",
+            f"levels={format_debug_value('|'.join(level_parts) if level_parts else 'none')}",
+            f"levels_source={format_debug_value('|'.join(source_parts) if source_parts else 'none')}",
         ]
 
         print(" ".join(fields))
