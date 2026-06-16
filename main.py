@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r32"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r33"
 
 RSI_PERIOD = 14
 
@@ -118,17 +118,32 @@ OI_CHANGE_4H_ACTIVE_THRESHOLD_PCT = 5.0
 OI_CHANGE_STRONG_4H_THRESHOLD_PCT = 10.0
 OI_CHANGE_NEGATIVE_THRESHOLD_PCT = -5.0
 
-# RSI divergence context layer (r32).
-# Context only at first: it is shown in Telegram and can create an OVERHEAT WATCH
-# only when pump/RSI context is already present. It does not create SHORT WATCH by itself.
+# Divergence context layer (r33).
+# Divergence is now a real status modifier:
+# - pump + RSI heat + RSI/OI divergence => SHORT WATCH;
+# - pump + RSI heat + RSI/OI divergence + sweep/rejection => HIGH PRIORITY.
 RSI_DIVERGENCE_SWING_LEFT_BARS = 2
 RSI_DIVERGENCE_SWING_RIGHT_BARS = 2
 RSI_DIVERGENCE_LOOKBACK_1H = 96
 RSI_DIVERGENCE_LOOKBACK_4H = 60
 RSI_DIVERGENCE_RECENT_WINDOW_1H = 12
 RSI_DIVERGENCE_RECENT_WINDOW_4H = 8
+RSI_DIVERGENCE_MIN_SWING_DISTANCE_1H = 5
+RSI_DIVERGENCE_MIN_SWING_DISTANCE_4H = 3
 RSI_DIVERGENCE_MIN_PRICE_HH_PCT = 0.002  # 0.20% higher high
+RSI_DIVERGENCE_EQUAL_HIGH_TOLERANCE_PCT = 0.003  # +/-0.30% equal high
 RSI_DIVERGENCE_MIN_RSI_DROP = 2.0        # RSI lower high by at least 2 points
+
+OI_DIVERGENCE_LOOKBACK_1H = 96
+OI_DIVERGENCE_LOOKBACK_4H = 60
+OI_DIVERGENCE_RECENT_WINDOW_1H = 12
+OI_DIVERGENCE_RECENT_WINDOW_4H = 8
+OI_DIVERGENCE_MIN_SWING_DISTANCE_1H = 5
+OI_DIVERGENCE_MIN_SWING_DISTANCE_4H = 3
+OI_DIVERGENCE_MIN_PRICE_HH_PCT = 0.002
+OI_DIVERGENCE_EQUAL_HIGH_TOLERANCE_PCT = 0.003
+OI_DIVERGENCE_MIN_OI_DROP_PCT = 2.0
+OI_DIVERGENCE_WEAK_SUPPORT_MAX_OI_CHANGE_PCT = 1.0
 
 PRE_FILTER_TOP_N = 40
 FINAL_TOP_N = 30
@@ -1702,15 +1717,50 @@ def collect_rsi_price_swing_highs(df, lookback=None):
     return swings
 
 
+def get_divergence_min_swing_distance(timeframe):
+    return int(RSI_DIVERGENCE_MIN_SWING_DISTANCE_4H if str(timeframe) == "4H" else RSI_DIVERGENCE_MIN_SWING_DISTANCE_1H)
+
+
+def price_high_relation(candidate_high, prior_high, min_hh_pct=None, equal_tolerance_pct=None):
+    if min_hh_pct is None:
+        min_hh_pct = RSI_DIVERGENCE_MIN_PRICE_HH_PCT
+    if equal_tolerance_pct is None:
+        equal_tolerance_pct = RSI_DIVERGENCE_EQUAL_HIGH_TOLERANCE_PCT
+
+    candidate = safe_float(candidate_high, default=np.nan)
+    prior = safe_float(prior_high, default=np.nan)
+
+    if pd.isna(candidate) or pd.isna(prior) or float(prior) <= 0:
+        return "none"
+
+    candidate = float(candidate)
+    prior = float(prior)
+
+    if candidate >= prior * (1 + float(min_hh_pct)):
+        return "higher_high"
+
+    if abs(candidate - prior) / prior <= float(equal_tolerance_pct):
+        return "equal_high"
+
+    return "none"
+
+
+def divergence_relation_label(relation):
+    if relation == "equal_high":
+        return "equal high"
+    if relation == "higher_high":
+        return "bearish"
+    return "bearish"
+
+
 def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
     """
-    Detect a simple bearish RSI divergence:
-    - recent price high is higher than a previous confirmed swing high;
-    - RSI at the recent high is lower than RSI at that previous swing high.
+    Detect bearish RSI divergence:
+    - classic: price higher high + RSI lower high;
+    - equal-high: price equal/near-equal high + RSI lower high.
 
-    The recent high may be in the latest closed setup window and does not need
-    to be a fully confirmed pivot yet. This keeps the factor useful for watchlist
-    alerts while avoiding live candle confirmation.
+    The two highs must be separated by a minimum number of candles so that the
+    model does not call adjacent-candle noise a divergence.
     """
 
     closed_df = get_closed_candles_dataframe_for_analysis(df)
@@ -1723,8 +1773,9 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
 
     lookback = RSI_DIVERGENCE_LOOKBACK_4H if str(timeframe) == "4H" else RSI_DIVERGENCE_LOOKBACK_1H
     recent_window = RSI_DIVERGENCE_RECENT_WINDOW_4H if str(timeframe) == "4H" else RSI_DIVERGENCE_RECENT_WINDOW_1H
+    min_distance = get_divergence_min_swing_distance(timeframe)
 
-    if len(closed_df) < max(20, recent_window + RSI_DIVERGENCE_SWING_LEFT_BARS + RSI_DIVERGENCE_SWING_RIGHT_BARS + 3):
+    if len(closed_df) < max(20, recent_window + RSI_DIVERGENCE_SWING_LEFT_BARS + RSI_DIVERGENCE_SWING_RIGHT_BARS + min_distance + 1):
         return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "not enough closed candles"}
 
     work_df = closed_df.copy().reset_index(drop=True)
@@ -1765,16 +1816,17 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
     swings = collect_rsi_price_swing_highs(analysis_df, lookback=None)
     prior_swings = [
         swing for swing in swings
-        if int(swing.get("local_index", -1)) < candidate_local_index - int(RSI_DIVERGENCE_SWING_RIGHT_BARS)
+        if int(swing.get("local_index", -1)) <= candidate_local_index - int(min_distance)
     ]
 
     if not prior_swings:
         return {
             "status": "not_confirmed",
             "timeframe": str(timeframe),
-            "detail": "no prior swing high",
+            "detail": "no prior swing high with required distance",
             "candidate_price_high": float(candidate_high),
             "candidate_rsi_high": float(candidate_rsi),
+            "min_distance_bars": int(min_distance),
         }
 
     prior_swings = sorted(prior_swings, key=lambda item: int(item.get("local_index", 0)), reverse=True)
@@ -1786,14 +1838,17 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
         if pd.isna(prior_high) or pd.isna(prior_rsi) or float(prior_high) <= 0:
             continue
 
-        price_higher_high = float(candidate_high) >= float(prior_high) * (1 + float(RSI_DIVERGENCE_MIN_PRICE_HH_PCT))
+        relation = price_high_relation(candidate_high, prior_high)
         rsi_lower_high = float(candidate_rsi) <= float(prior_rsi) - float(RSI_DIVERGENCE_MIN_RSI_DROP)
 
-        if price_higher_high and rsi_lower_high:
+        if relation in ("higher_high", "equal_high") and rsi_lower_high:
+            label = divergence_relation_label(relation)
+            detail = f"{timeframe} RSI bearish" if relation == "higher_high" else f"{timeframe} RSI bearish equal high"
             return {
                 "status": "confirmed",
                 "timeframe": str(timeframe),
-                "detail": f"{timeframe} RSI bearish",
+                "detail": detail,
+                "divergence_type": str(relation),
                 "candidate_index": int(candidate_global_index),
                 "candidate_time": candidate_time,
                 "candidate_price_high": float(candidate_high),
@@ -1802,6 +1857,8 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
                 "prior_time": prior.get("timestamp"),
                 "prior_price_high": float(prior_high),
                 "prior_rsi_high": float(prior_rsi),
+                "distance_bars": int(candidate_local_index - int(prior.get("local_index", 0))),
+                "min_distance_bars": int(min_distance),
                 "price_change_pct": float(((float(candidate_high) - float(prior_high)) / float(prior_high)) * 100),
                 "rsi_drop": float(float(prior_rsi) - float(candidate_rsi)),
             }
@@ -1812,8 +1869,8 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
         "detail": "no bearish RSI divergence",
         "candidate_price_high": float(candidate_high),
         "candidate_rsi_high": float(candidate_rsi),
+        "min_distance_bars": int(min_distance),
     }
-
 
 def detect_rsi_bearish_divergence(df_1h=None, df_4h=None):
     item_1h = detect_rsi_bearish_divergence_for_timeframe(df_1h, timeframe="1H") if df_1h is not None else {
@@ -1843,6 +1900,288 @@ def has_confirmed_rsi_divergence(short_factors):
     factor = get_short_factor(short_factors, "rsi_divergence") or {}
     return bool(factor.get("status") == "confirmed")
 
+
+
+
+def get_oi_divergence_min_swing_distance(timeframe):
+    return int(OI_DIVERGENCE_MIN_SWING_DISTANCE_4H if str(timeframe) == "4H" else OI_DIVERGENCE_MIN_SWING_DISTANCE_1H)
+
+
+def get_oi_history_value_for_candle(history, candle_time, timeframe="1H"):
+    if candle_time is None:
+        return np.nan
+    try:
+        # Use the candle close time for OI alignment. OI snapshots are not
+        # guaranteed to be exactly at candle open time.
+        target = pd.to_datetime(candle_time) + pd.Timedelta(hours=get_timeframe_hours(timeframe))
+        return get_history_value_at_or_before(history, target)
+    except Exception:
+        return np.nan
+
+
+def collect_price_oi_swing_highs(df, oi_history, timeframe="1H", lookback=None):
+    if df is None or df.empty or oi_history is None or oi_history.empty:
+        return []
+
+    if "high" not in df.columns:
+        return []
+
+    work_df = df.copy().reset_index(drop=True)
+    if lookback is not None and len(work_df) > int(lookback):
+        offset = len(work_df) - int(lookback)
+        work_df = work_df.iloc[offset:].copy().reset_index(drop=True)
+    else:
+        offset = 0
+
+    left = int(RSI_DIVERGENCE_SWING_LEFT_BARS)
+    right = int(RSI_DIVERGENCE_SWING_RIGHT_BARS)
+
+    if len(work_df) <= left + right + 1:
+        return []
+
+    highs = pd.to_numeric(work_df["high"], errors="coerce")
+    swings = []
+
+    for i in range(left, len(work_df) - right):
+        high_value = highs.iloc[i]
+
+        if pd.isna(high_value):
+            continue
+
+        left_window = highs.iloc[i - left:i]
+        right_window = highs.iloc[i + 1:i + right + 1]
+
+        if left_window.dropna().empty or right_window.dropna().empty:
+            continue
+
+        is_swing_high = (
+            float(high_value) >= float(left_window.max()) and
+            float(high_value) > float(right_window.max())
+        )
+
+        if not is_swing_high:
+            continue
+
+        timestamp = None
+        if "timestamp" in work_df.columns:
+            try:
+                timestamp = pd.to_datetime(work_df.iloc[i]["timestamp"])
+            except Exception:
+                timestamp = None
+
+        oi_value = get_oi_history_value_for_candle(oi_history, timestamp, timeframe=timeframe)
+
+        if pd.isna(oi_value):
+            continue
+
+        swings.append({
+            "index": int(i + offset),
+            "local_index": int(i),
+            "timestamp": timestamp,
+            "price_high": float(high_value),
+            "oi_high": float(oi_value),
+        })
+
+    return swings
+
+
+def detect_oi_bearish_divergence_for_timeframe(df, oi_history, timeframe="1H"):
+    """Detect price high without OI confirmation.
+
+    Strong OI bearish divergence:
+    - price higher/equal high;
+    - OI at the second high is lower by at least OI_DIVERGENCE_MIN_OI_DROP_PCT.
+
+    Weak OI support:
+    - price higher/equal high;
+    - OI increased less than OI_DIVERGENCE_WEAK_SUPPORT_MAX_OI_CHANGE_PCT.
+      This is shown in Telegram but does not count as a strong divergence for
+      status upgrades.
+    """
+
+    closed_df = get_closed_candles_dataframe_for_analysis(df)
+
+    if closed_df is None or closed_df.empty:
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "no closed candles"}
+
+    history = oi_history.copy() if isinstance(oi_history, pd.DataFrame) else pd.DataFrame()
+    if history.empty:
+        return {"status": "not_available", "timeframe": str(timeframe), "detail": "OI history unavailable"}
+
+    if "high" not in closed_df.columns:
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "high unavailable"}
+
+    lookback = OI_DIVERGENCE_LOOKBACK_4H if str(timeframe) == "4H" else OI_DIVERGENCE_LOOKBACK_1H
+    recent_window = OI_DIVERGENCE_RECENT_WINDOW_4H if str(timeframe) == "4H" else OI_DIVERGENCE_RECENT_WINDOW_1H
+    min_distance = get_oi_divergence_min_swing_distance(timeframe)
+
+    if len(closed_df) < max(20, recent_window + RSI_DIVERGENCE_SWING_LEFT_BARS + RSI_DIVERGENCE_SWING_RIGHT_BARS + min_distance + 1):
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "not enough closed candles"}
+
+    work_df = closed_df.copy().reset_index(drop=True)
+    if len(work_df) > int(lookback):
+        base_offset = len(work_df) - int(lookback)
+        analysis_df = work_df.iloc[base_offset:].copy().reset_index(drop=True)
+    else:
+        base_offset = 0
+        analysis_df = work_df.copy().reset_index(drop=True)
+
+    highs = pd.to_numeric(analysis_df["high"], errors="coerce")
+    window = min(max(1, int(recent_window)), len(analysis_df))
+    recent_slice = highs.iloc[-window:]
+
+    if recent_slice.dropna().empty:
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "recent highs unavailable"}
+
+    candidate_local_index = int(recent_slice.idxmax())
+    candidate_high = safe_float(highs.iloc[candidate_local_index], default=np.nan)
+
+    if pd.isna(candidate_high):
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "candidate high unavailable"}
+
+    candidate_time = None
+    if "timestamp" in analysis_df.columns:
+        try:
+            candidate_time = pd.to_datetime(analysis_df.iloc[candidate_local_index]["timestamp"])
+        except Exception:
+            candidate_time = None
+
+    candidate_oi = get_oi_history_value_for_candle(history, candidate_time, timeframe=timeframe)
+
+    if pd.isna(candidate_oi):
+        return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "candidate OI unavailable"}
+
+    swings = collect_price_oi_swing_highs(analysis_df, history, timeframe=timeframe, lookback=None)
+    prior_swings = [
+        swing for swing in swings
+        if int(swing.get("local_index", -1)) <= candidate_local_index - int(min_distance)
+    ]
+
+    if not prior_swings:
+        return {
+            "status": "not_confirmed",
+            "timeframe": str(timeframe),
+            "detail": "no prior swing high with OI",
+            "candidate_price_high": float(candidate_high),
+            "candidate_oi_high": float(candidate_oi),
+            "min_distance_bars": int(min_distance),
+        }
+
+    prior_swings = sorted(prior_swings, key=lambda item: int(item.get("local_index", 0)), reverse=True)
+    weak_candidate = None
+
+    for prior in prior_swings:
+        prior_high = safe_float(prior.get("price_high"), default=np.nan)
+        prior_oi = safe_float(prior.get("oi_high"), default=np.nan)
+
+        if pd.isna(prior_high) or pd.isna(prior_oi) or float(prior_high) <= 0 or float(prior_oi) <= 0:
+            continue
+
+        relation = price_high_relation(
+            candidate_high,
+            prior_high,
+            min_hh_pct=OI_DIVERGENCE_MIN_PRICE_HH_PCT,
+            equal_tolerance_pct=OI_DIVERGENCE_EQUAL_HIGH_TOLERANCE_PCT,
+        )
+
+        if relation not in ("higher_high", "equal_high"):
+            continue
+
+        oi_change_pct = percent_change_from_values(candidate_oi, prior_oi)
+
+        if oi_change_pct is None:
+            continue
+
+        base_event = {
+            "timeframe": str(timeframe),
+            "divergence_type": str(relation),
+            "candidate_index": int(candidate_local_index + base_offset),
+            "candidate_time": candidate_time,
+            "candidate_price_high": float(candidate_high),
+            "candidate_oi_high": float(candidate_oi),
+            "prior_index": int(prior.get("index", 0) + base_offset),
+            "prior_time": prior.get("timestamp"),
+            "prior_price_high": float(prior_high),
+            "prior_oi_high": float(prior_oi),
+            "distance_bars": int(candidate_local_index - int(prior.get("local_index", 0))),
+            "min_distance_bars": int(min_distance),
+            "price_change_pct": float(((float(candidate_high) - float(prior_high)) / float(prior_high)) * 100),
+            "oi_change_pct": float(oi_change_pct),
+        }
+
+        if float(oi_change_pct) <= -float(OI_DIVERGENCE_MIN_OI_DROP_PCT):
+            detail = f"{timeframe} OI bearish" if relation == "higher_high" else f"{timeframe} OI bearish equal high"
+            base_event.update({"status": "confirmed", "detail": detail})
+            return base_event
+
+        if float(oi_change_pct) <= float(OI_DIVERGENCE_WEAK_SUPPORT_MAX_OI_CHANGE_PCT) and weak_candidate is None:
+            detail = f"{timeframe} weak OI support"
+            base_event.update({"status": "weak", "detail": detail})
+            weak_candidate = base_event
+
+    if weak_candidate is not None:
+        return weak_candidate
+
+    return {
+        "status": "not_confirmed",
+        "timeframe": str(timeframe),
+        "detail": "no OI divergence",
+        "candidate_price_high": float(candidate_high),
+        "candidate_oi_high": float(candidate_oi),
+        "min_distance_bars": int(min_distance),
+    }
+
+
+def detect_oi_bearish_divergence(df_1h=None, df_4h=None, oi_history=None, provider="provider"):
+    if str(provider).lower().startswith("bitget"):
+        factor = make_factor("oi_divergence", "OI divergence", "not_available", points=0, detail="Bitget history not supported")
+        factor["events"] = []
+        factor["provider"] = str(provider)
+        return factor
+
+    item_1h = detect_oi_bearish_divergence_for_timeframe(df_1h, oi_history, timeframe="1H") if df_1h is not None else {
+        "status": "not_enough_data", "timeframe": "1H", "detail": "1H unavailable"
+    }
+    item_4h = detect_oi_bearish_divergence_for_timeframe(df_4h, oi_history, timeframe="4H") if df_4h is not None else {
+        "status": "not_enough_data", "timeframe": "4H", "detail": "4H unavailable"
+    }
+
+    confirmed = [item for item in [item_4h, item_1h] if item.get("status") == "confirmed"]
+    weak = [item for item in [item_4h, item_1h] if item.get("status") == "weak"]
+
+    if confirmed:
+        detail = " | ".join(str(item.get("detail", "")).strip() for item in confirmed if item.get("detail"))
+        factor = make_factor("oi_divergence", "OI divergence", "confirmed", points=0, detail=detail)
+        factor["events"] = confirmed + weak
+        factor["provider"] = str(provider)
+        return factor
+
+    if weak:
+        detail = " | ".join(str(item.get("detail", "")).strip() for item in weak if item.get("detail"))
+        factor = make_factor("oi_divergence", "OI divergence", "weak", points=0, detail=detail)
+        factor["events"] = weak
+        factor["provider"] = str(provider)
+        return factor
+
+    if item_1h.get("status") in ("not_available", "not_enough_data") and item_4h.get("status") in ("not_available", "not_enough_data"):
+        factor = make_factor("oi_divergence", "OI divergence", "not_enough_data", points=0, detail="OI history unavailable")
+        factor["events"] = [item_4h, item_1h]
+        factor["provider"] = str(provider)
+        return factor
+
+    factor = make_factor("oi_divergence", "OI divergence", "not_confirmed", points=0, detail="none")
+    factor["events"] = [item_4h, item_1h]
+    factor["provider"] = str(provider)
+    return factor
+
+
+def has_confirmed_oi_divergence(short_factors):
+    factor = get_short_factor(short_factors, "oi_divergence") or {}
+    return bool(factor.get("status") == "confirmed")
+
+
+def has_any_bearish_divergence(short_factors):
+    return bool(has_confirmed_rsi_divergence(short_factors) or has_confirmed_oi_divergence(short_factors))
 
 def normalize_daily_candles(df_1d):
     if df_1d is None or df_1d.empty:
@@ -3397,7 +3736,7 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
 
 
 
-def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
+def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None, oi_history=None, provider="provider"):
     """
     Current simplified short-watch factor set.
 
@@ -3405,7 +3744,7 @@ def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
     - Liquidity sweep: confirmed price-action trigger.
     - Open levels: D/W/M/Y resistance location/context.
     - Rejection candle: confirmed trigger only at D/W/M/Y open-level resistance.
-    - RSI bearish divergence: context layer, not a short trigger by itself.
+    - RSI/OI bearish divergence: context layer and status modifier.
 
     Removed from active model:
     - Premium/Discount: previous implementation was range-position, not a full ICT dealing range.
@@ -3424,6 +3763,7 @@ def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None):
         open_levels_factor,
         detect_rejection_candle(df_1h=df_1h, df_4h=df_4h, df_1d=df_1d, current_price=current_price),
         detect_rsi_bearish_divergence(df_1h=df_1h, df_4h=df_4h),
+        detect_oi_bearish_divergence(df_1h=df_1h, df_4h=df_4h, oi_history=oi_history, provider=provider),
     ]
 
     score = sum(int(factor.get("points", 0)) for factor in factors)
@@ -3653,44 +3993,51 @@ def quality_trigger_label_from_context(context):
     return "None"
 
 
+def divergence_summary_for_reason(short_factors):
+    rsi = has_confirmed_rsi_divergence(short_factors)
+    oi = has_confirmed_oi_divergence(short_factors)
+
+    if rsi and oi:
+        return "RSI/OI divergence"
+    if rsi:
+        return "RSI divergence"
+    if oi:
+        return "OI divergence"
+    return "bearish divergence"
+
+
 def build_setup_status(signal_level, scores, short_factors):
     context = calculate_location_trigger_context(short_factors)
-    trigger_count = int(context.get("trigger_count", 0))
     has_overheat_context = bool(scores.get("has_overheat_context", False))
-    has_rsi_divergence = has_confirmed_rsi_divergence(short_factors)
     has_open_resistance = bool(context.get("has_open_resistance", False))
-    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
     liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
     rejection_confirmed = bool(context.get("rejection_confirmed", False))
-    has_rsi_divergence = has_confirmed_rsi_divergence(short_factors)
+    has_divergence = has_any_bearish_divergence(short_factors)
+    div_text = divergence_summary_for_reason(short_factors)
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
         if liquidity_confirmed and rejection_confirmed:
-            return "High priority watch — liquidity sweep + open-level rejection"
-        if liquidity_confirmed and has_htf_open_resistance:
-            return "High priority watch — liquidity sweep + HTF open resistance"
+            return f"High priority watch — liquidity sweep + open-level rejection + {div_text}"
         if rejection_confirmed:
-            return "High priority watch — open-level rejection"
-        return "High priority watch — strong heat and confirmed short trigger"
+            return f"High priority watch — open-level rejection + {div_text}"
+        if liquidity_confirmed:
+            return f"High priority watch — liquidity sweep + {div_text}"
+        return f"High priority watch — RSI heat + {div_text}"
 
     if signal_level == "SHORT_WATCH":
+        if has_overheat_context and has_divergence and not (liquidity_confirmed or rejection_confirmed):
+            return f"Short watch — RSI heat + {div_text}; waiting for short trigger"
         if liquidity_confirmed and rejection_confirmed:
             return "Short watch — liquidity sweep + open-level rejection"
         if liquidity_confirmed:
-            if has_htf_open_resistance:
-                return "Short watch — liquidity sweep + HTF open resistance"
             if has_open_resistance:
                 return "Short watch — liquidity sweep + open resistance"
             return "Short watch — confirmed liquidity sweep detected"
         if rejection_confirmed:
             return "Short watch — open-level rejection"
-        return "Short watch — waiting for confirmed short trigger"
+        return "Short watch — watchlist context"
 
     if signal_level == "OVERHEAT_WATCH":
-        if has_rsi_divergence and not has_overheat_context:
-            if has_open_resistance:
-                return "Overheat watch — bearish RSI divergence near open resistance; waiting for short trigger"
-            return "Overheat watch — bearish RSI divergence; waiting for short trigger"
         if has_open_resistance:
             return "Overheat watch — RSI heat near open resistance; waiting for short trigger"
         return "Overheat watch — RSI heat confirmed; waiting for short trigger"
@@ -3699,104 +4046,79 @@ def build_setup_status(signal_level, scores, short_factors):
 
 
 def build_watch_reason(signal_level, scores, short_factors):
-    pump_quality = quality_pump_label(scores.get("pump_score", 0))
-    heat_quality = quality_heat_label(scores.get("rsi_score", 0))
     context = calculate_location_trigger_context(short_factors)
-    trigger_quality = quality_trigger_label_from_context(context)
-    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
     has_open_resistance = bool(context.get("has_open_resistance", False))
     liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
     rejection_confirmed = bool(context.get("rejection_confirmed", False))
+    has_divergence = has_any_bearish_divergence(short_factors)
+    div_text = divergence_summary_for_reason(short_factors)
 
     if signal_level == "HIGH_PRIORITY_SHORT_WATCH":
-        parts = [f"{pump_quality} pump", f"{heat_quality} RSI heat"]
+        parts = []
         if liquidity_confirmed:
             parts.append("liquidity sweep")
         if rejection_confirmed:
             parts.append("open-level rejection")
-        elif has_htf_open_resistance:
-            parts.append("HTF open resistance")
-        elif has_open_resistance:
-            parts.append("open resistance")
-        return " + ".join(parts)
+        if has_divergence:
+            parts.append(div_text)
+        return " + ".join(parts) if parts else "high priority short-watch context"
 
     if signal_level == "SHORT_WATCH":
+        if bool(scores.get("has_overheat_context", False)) and has_divergence and not (liquidity_confirmed or rejection_confirmed):
+            return f"RSI heat + {div_text}"
         if rejection_confirmed and liquidity_confirmed:
             return "liquidity sweep + open-level rejection"
         if rejection_confirmed:
+            if has_divergence:
+                return f"open-level rejection + {div_text}"
             return "open-level rejection"
-        if liquidity_confirmed and has_htf_open_resistance:
-            return "confirmed liquidity sweep + HTF open resistance"
-        if liquidity_confirmed and has_open_resistance:
-            return "confirmed liquidity sweep + open resistance"
         if liquidity_confirmed:
+            if has_divergence:
+                return f"liquidity sweep + {div_text}"
+            if has_open_resistance:
+                return "confirmed liquidity sweep + open resistance"
             return "confirmed liquidity sweep"
-        return trigger_quality
+        if has_divergence:
+            return div_text
+        return "short-watch context"
 
     if signal_level == "OVERHEAT_WATCH":
-        if has_rsi_divergence and not bool(scores.get("has_overheat_context", False)):
-            base = "bearish RSI divergence"
-        else:
-            base = str(scores.get("overheat_reason") or f"{pump_quality} pump + {heat_quality} RSI heat")
-        if has_open_resistance:
-            return base + " + open resistance"
-        return base
+        return "RSI heat confirmed; waiting for short trigger"
 
     return "Watch filters not passed"
 
 
 def classify_watch_signal(scores, short_factors=None):
     """
-    Simplified Short Watch model.
+    r33 classification.
 
-    Input filter is handled separately by RSI_ENTRY_FILTER.
-    Location/context: Open Levels only.
-    Triggers: confirmed Liquidity Sweep or confirmed Rejection at Open Levels.
-    Telegram output levels: OVERHEAT, SHORT WATCH, HIGH PRIORITY SHORT WATCH.
+    - 🟡 OVERHEAT WATCH: pump + RSI heat, no divergence/trigger.
+    - 🟠 SHORT WATCH: sweep/rejection OR pump + RSI heat + RSI/OI divergence.
+    - 🔴 HIGH PRIORITY: pump + RSI heat + RSI/OI divergence + sweep/rejection.
+
+    All statuses remain watchlist statuses, not entry signals.
     """
 
     short_factors = short_factors or []
-
-    pump_score = int(scores.get("pump_score", 0))
-    rsi_score = int(scores.get("rsi_score", 0))
 
     context = calculate_location_trigger_context(short_factors)
     location_score = float(context.get("location_score", 0.0))
     trigger_count = int(context.get("trigger_count", 0))
     open_context_score = float(context.get("open_context_score", 0.0))
     htf_open_context_score = float(context.get("htf_open_context_score", 0.0))
-    has_open_resistance = bool(context.get("has_open_resistance", False))
-    has_htf_open_resistance = bool(context.get("has_htf_open_resistance", False))
-    liquidity_confirmed = bool(context.get("liquidity_confirmed", False))
-    rejection_confirmed = bool(context.get("rejection_confirmed", False))
 
-    has_basic_pump = bool(scores.get("has_basic_pump_context", False)) or pump_score >= 1
-    has_strong_pump = bool(scores.get("has_strong_pump_context", False)) or pump_score >= 2
-    has_extreme_pump = bool(scores.get("has_extreme_pump_context", False)) or pump_score >= 3
     has_overheat_context = bool(scores.get("has_overheat_context", False))
-    has_rsi_divergence = has_confirmed_rsi_divergence(short_factors)
-    divergence_watch_context = bool(has_basic_pump and has_rsi_divergence and rsi_score >= 1)
-
-    has_strong_heat = rsi_score >= 3 or has_overheat_context
     has_trigger = trigger_count >= 1
-    pump_or_overheat = has_basic_pump or has_overheat_context or divergence_watch_context
+    has_divergence = has_any_bearish_divergence(short_factors)
 
-    high_priority_context = (
-        has_htf_open_resistance
-        or rejection_confirmed
-        or (has_open_resistance and liquidity_confirmed)
-    )
-
-    if (
-        has_trigger
-        and (has_extreme_pump or has_strong_pump)
-        and has_strong_heat
-        and high_priority_context
-    ):
+    # Main decision tree agreed in r33.
+    if has_overheat_context and has_divergence and has_trigger:
         signal_level = "HIGH_PRIORITY_SHORT_WATCH"
-    elif pump_or_overheat and has_trigger:
+    elif has_trigger:
         signal_level = "SHORT_WATCH"
-    elif has_overheat_context or divergence_watch_context:
+    elif has_overheat_context and has_divergence:
+        signal_level = "SHORT_WATCH"
+    elif has_overheat_context:
         signal_level = "OVERHEAT_WATCH"
     else:
         signal_level = "NO_SIGNAL"
@@ -3810,6 +4132,7 @@ def classify_watch_signal(scores, short_factors=None):
         "trigger_count": int(trigger_count),
         "setup_status": build_setup_status(signal_level, scores, short_factors),
     }
+
 
 def classify_signal(
     rsi_1h_live,
@@ -4162,6 +4485,7 @@ def build_open_interest_metrics(history_df=None, current_oi=None, provider="prov
             "oi_source": str(provider),
             "oi_history_points": history_points,
             "oi_history_latest_ts": history_latest_ts,
+            "oi_history_df": history,
         }
 
     if has_current_value:
@@ -4175,6 +4499,7 @@ def build_open_interest_metrics(history_df=None, current_oi=None, provider="prov
             "oi_source": str(provider),
             "oi_history_points": 0,
             "oi_history_latest_ts": None,
+            "oi_history_df": pd.DataFrame(columns=["timestamp", "open_interest"]),
         }
 
     return {
@@ -4187,6 +4512,7 @@ def build_open_interest_metrics(history_df=None, current_oi=None, provider="prov
         "oi_source": str(provider),
         "oi_history_points": 0,
         "oi_history_latest_ts": None,
+        "oi_history_df": pd.DataFrame(columns=["timestamp", "open_interest"]),
     }
 
 
@@ -4240,26 +4566,24 @@ def format_oi_line_for_telegram(detail):
     if not isinstance(detail, dict):
         return ""
 
+    source = str(detail.get("oi_source", detail.get("exchange", "")) or "")
+    status = str(detail.get("oi_status", "") or "")
+    context = str(detail.get("oi_context", "N/A") or "N/A")
     change_1h = detail.get("oi_change_1h_percent")
     change_4h = detail.get("oi_change_4h_percent")
-    current_oi = detail.get("oi_current")
 
-    has_1h = change_1h is not None and not pd.isna(safe_float(change_1h, default=np.nan))
-    has_4h = change_4h is not None and not pd.isna(safe_float(change_4h, default=np.nan))
-    has_current = current_oi is not None and not pd.isna(safe_float(current_oi, default=np.nan))
+    if source.lower().startswith("bitget"):
+        return "OI: unavailable — Bitget history not supported"
 
-    if not has_1h and not has_4h:
-        if has_current:
-            return f"OI: current {format_large_number(current_oi)} | history N/A"
-        return ""
+    # Raw weak/mixed OI lines are hidden because they add noise. Show only
+    # actionable context that can help interpret a pump.
+    if context == "Long build-up":
+        return f"OI: Long build-up ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
-    context = str(detail.get("oi_context", "N/A") or "N/A")
-    line = f"OI: 1H {format_oi_percent_for_telegram(change_1h)} | 4H {format_oi_percent_for_telegram(change_4h)}"
+    if context == "Short squeeze / OI unwind":
+        return f"OI: OI unwind ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
-    if context and context != "N/A":
-        line += f" | {context}"
-
-    return line
+    return ""
 
 # ============================================================
 # OKX PROVIDER
@@ -4593,7 +4917,14 @@ def okx_analyze_candidate(inst_id, ticker_row):
 
     oi_metrics = okx_get_open_interest_metrics(inst_id)
 
-    short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
+    short_analysis = analyze_short_factors(
+        df_1h,
+        df_4h,
+        df_1d=df_1d,
+        current_price=price,
+        oi_history=oi_metrics.get("oi_history_df"),
+        provider="OKX",
+    )
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -5013,7 +5344,14 @@ def bitget_analyze_candidate(symbol, ticker_row):
 
     oi_metrics = bitget_get_open_interest_metrics(symbol)
 
-    short_analysis = analyze_short_factors(df_1h, df_4h, df_1d=df_1d, current_price=price)
+    short_analysis = analyze_short_factors(
+        df_1h,
+        df_4h,
+        df_1d=df_1d,
+        current_price=price,
+        oi_history=oi_metrics.get("oi_history_df"),
+        provider="Bitget",
+    )
 
     classification = classify_signal(
         rsi_1h_live=rsi_1h_live,
@@ -5120,9 +5458,9 @@ def get_telegram_credentials():
 
 def telegram_signal_label(signal_level):
     labels = {
-        "HIGH_PRIORITY_SHORT_WATCH": "🔴🔴 HIGH PRIORITY SHORT WATCH",
-        "SHORT_WATCH": "🔴 SHORT WATCH",
-        "OVERHEAT_WATCH": "🟠 OVERHEAT WATCH",
+        "HIGH_PRIORITY_SHORT_WATCH": "🔴 HIGH PRIORITY SHORT WATCH",
+        "SHORT_WATCH": "🟠 SHORT WATCH",
+        "OVERHEAT_WATCH": "🟡 OVERHEAT WATCH",
         "PUMP_WATCH": "🟡 PUMP WATCH",
         "NO_SIGNAL": "⚪ NO SIGNAL",
     }
@@ -5679,6 +6017,30 @@ def format_rsi_divergence_detail_for_telegram(factors):
     return ""
 
 
+def format_oi_divergence_detail_for_telegram(factors):
+    factor = find_factor(factors, "oi_divergence") or {}
+    status = str(factor.get("status", "") or "")
+    detail = str(factor.get("detail", "") or "").strip()
+
+    if status in ("confirmed", "weak") and detail:
+        return detail
+
+    return ""
+
+
+def format_divergence_detail_for_telegram(factors):
+    parts = []
+    rsi_detail = format_rsi_divergence_detail_for_telegram(factors)
+    oi_detail = format_oi_divergence_detail_for_telegram(factors)
+
+    if rsi_detail:
+        parts.append(rsi_detail)
+
+    if oi_detail:
+        parts.append(oi_detail)
+
+    return " | ".join(parts)
+
 def format_local_high_detail_for_telegram(factors):
     factor = find_factor(factors, "local_high_update") or {}
     status = factor.get("status")
@@ -6225,7 +6587,7 @@ def format_multi_provider_telegram(
             oi_line = html.escape(format_oi_line_for_telegram(detail))
             if oi_line:
                 lines.append(oi_line)
-            divergence_detail = html.escape(format_rsi_divergence_detail_for_telegram(short_factors))
+            divergence_detail = html.escape(format_divergence_detail_for_telegram(short_factors))
             if divergence_detail:
                 lines.append(f"Div: {divergence_detail}")
             open_levels_detail = html.escape(format_open_levels_detail_for_telegram(short_factors))
@@ -6241,7 +6603,7 @@ def format_multi_provider_telegram(
                 lines.append("────────────")
 
     lines.append("")
-    lines.append("Planned: ⚪ Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS | ⚪ OI div")
+    lines.append("Planned: ⚪ Funding | ⚪ Vol climax | ⚪ Failed BO | ⚪ MSS")
 
     return "\n".join(lines)
 
@@ -6917,6 +7279,18 @@ def make_classification_local_high_factor(points=0):
     )
 
 
+
+def make_classification_rsi_divergence_factor():
+    factor = make_factor(
+        key="rsi_divergence",
+        label="RSI divergence",
+        status="confirmed",
+        points=0,
+        detail="1H RSI bearish",
+    )
+    factor["events"] = [{"status": "confirmed", "timeframe": "1H", "detail": "1H RSI bearish"}]
+    return factor
+
 def run_open_levels_classification_self_tests():
     print("\n" + "=" * 120)
     print("RUNNING OPEN LEVELS CLASSIFICATION SELF TESTS")
@@ -6964,12 +7338,22 @@ def run_open_levels_classification_self_tests():
             "NO_SIGNAL",
         ),
         (
-            "Strong heat + sweep + W tested can upgrade to HIGH PRIORITY",
+            "Strong heat + sweep + W tested remains SHORT WATCH without divergence",
             strong_heat_scores,
             [
                 make_classification_sweep_factor(),
                 make_classification_premium_factor(points=0),
                 make_classification_local_high_factor(points=0),
+                make_classification_open_factor(["W"], ["tested"]),
+            ],
+            "SHORT_WATCH",
+        ),
+        (
+            "Strong heat + sweep + divergence upgrades to HIGH PRIORITY",
+            {**strong_heat_scores, "has_overheat_context": True},
+            [
+                make_classification_sweep_factor(),
+                make_classification_rsi_divergence_factor(),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "HIGH_PRIORITY_SHORT_WATCH",
@@ -7501,7 +7885,7 @@ def run_open_interest_self_tests():
             "oi_change_1h_percent": 8.44,
             "oi_change_4h_percent": 21.74,
             "oi_context": "Long build-up",
-        }) == "OI: 1H +8.4% | 4H +21.7% | Long build-up",
+        }) == "OI: Long build-up (+8.4% 1H / +21.7% 4H)",
     ))
     tests.append((
         "format_current_only_line",
@@ -7510,7 +7894,8 @@ def run_open_interest_self_tests():
             "oi_change_1h_percent": None,
             "oi_change_4h_percent": None,
             "oi_context": "N/A",
-        }) == "OI: current 3.29M | history N/A",
+            "oi_source": "Bitget",
+        }) == "OI: unavailable — Bitget history not supported",
     ))
     bitget_sample = {
         "openInterestList": [
@@ -7562,8 +7947,8 @@ def run_rsi_divergence_self_tests():
     def make_divergence_df():
         rows = []
         base_time = pd.Timestamp("2026-01-01 00:00:00")
-        highs = [100, 102, 104, 106, 108, 111, 115, 110, 107, 105, 106, 108, 110, 112, 114, 116, 118, 122, 119, 117]
-        rsis =  [45,  48,  52,  55,  60,  68,  78,  70,  61,  55,  54,  56,  58,  60,  61,  62,  64,  70,  68,  66]
+        highs = [100, 102, 104, 106, 108, 111, 115, 110, 107, 105, 106, 108, 110, 112, 114, 116, 118, 122, 119, 117, 116, 115, 114, 113]
+        rsis =  [45,  48,  52,  55,  60,  68,  78,  70,  61,  55,  54,  56,  58,  60,  61,  62,  64,  70,  68,  66,  64,  62,  60,  58]
         for i, (high, rsi) in enumerate(zip(highs, rsis)):
             close = high - 1
             rows.append({
@@ -7579,7 +7964,8 @@ def run_rsi_divergence_self_tests():
 
     def make_no_divergence_df():
         df = make_divergence_df()
-        df.loc[len(df) - 3, "rsi"] = 82.0
+        # Candidate high is at index 17 in this synthetic series.
+        df.loc[17, "rsi"] = 82.0
         return df
 
     div_df = make_divergence_df()
@@ -7610,6 +7996,80 @@ def run_rsi_divergence_self_tests():
     print(f"RSI DIVERGENCE SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
+
+def run_oi_divergence_self_tests():
+    print("RUNNING OI DIVERGENCE SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+
+    def make_price_df():
+        rows = []
+        base_time = pd.Timestamp("2026-01-01 00:00:00")
+        highs = [100, 102, 104, 106, 108, 111, 115, 110, 107, 105, 106, 108, 110, 112, 114, 116, 118, 122, 119, 117, 116, 115, 114, 113]
+        for i, high in enumerate(highs):
+            close = high - 1
+            rows.append({
+                "timestamp": base_time + pd.Timedelta(hours=i),
+                "open": close - 0.5,
+                "high": float(high),
+                "low": close - 2,
+                "close": float(close),
+                "confirm": 1,
+            })
+        return pd.DataFrame(rows)
+
+    def make_oi_history(bearish=True):
+        rows = []
+        base_time = pd.Timestamp("2026-01-01 00:00:00")
+        for i in range(0, 30):
+            value = 100.0 + i
+            rows.append({"timestamp": base_time + pd.Timedelta(hours=i), "open_interest": value})
+        # Prior price swing high is around candle 6 close time; candidate high is around candle 17 close time.
+        # Bearish case: OI at candidate high is below prior swing high OI.
+        rows[7]["open_interest"] = 120.0
+        rows[18]["open_interest"] = 112.0 if bearish else 135.0
+        return pd.DataFrame(rows)
+
+    price_df = make_price_df()
+    bearish_oi = make_oi_history(bearish=True)
+    confirming_oi = make_oi_history(bearish=False)
+
+    tests = [
+        (
+            "1H OI bearish divergence detected",
+            lambda: detect_oi_bearish_divergence_for_timeframe(price_df, bearish_oi, timeframe="1H").get("status") == "confirmed",
+        ),
+        (
+            "1H no OI divergence when OI confirms high",
+            lambda: detect_oi_bearish_divergence_for_timeframe(price_df, confirming_oi, timeframe="1H").get("status") in ("not_confirmed", "weak"),
+        ),
+        (
+            "combined OI divergence factor confirms OKX history",
+            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="OKX").get("status") == "confirmed",
+        ),
+        (
+            "Bitget OI divergence unavailable due history restriction",
+            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="Bitget").get("status") == "not_available",
+        ),
+    ]
+
+    failed = 0
+    for name, check in tests:
+        try:
+            ok = bool(check())
+        except Exception as exc:
+            ok = False
+            print(f"❌ {name}: {exc}")
+
+        if not ok:
+            failed += 1
+            print(f"❌ {name}")
+
+    if failed:
+        raise AssertionError(f"OI divergence self-tests failed: {failed}/{len(tests)}")
+
+    print(f"OI DIVERGENCE SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def main():
     if "--self-test" in sys.argv:
         run_sweep_self_tests()
@@ -7620,6 +8080,7 @@ def main():
         run_rsi_entry_filter_self_tests()
         run_open_interest_self_tests()
         run_rsi_divergence_self_tests()
+        run_oi_divergence_self_tests()
         return
 
     get_telegram_credentials()
