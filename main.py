@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r33"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r34"
 
 RSI_PERIOD = 14
 
@@ -155,6 +155,12 @@ CANDLE_LIMIT_1D = 300
 REQUEST_DELAY_SECONDS = 0.15
 
 SEND_MESSAGE_IF_NO_SIGNALS = True
+
+# Telegram delivery is best-effort. A temporary Telegram API timeout must not
+# fail the whole GitHub Actions run after the screener has already completed.
+TELEGRAM_SEND_TIMEOUT_SECONDS = 10
+TELEGRAM_SEND_MAX_ATTEMPTS = 1
+TELEGRAM_SEND_RETRY_SLEEP_SECONDS = 2
 
 OKX_BASE_URL = "https://www.okx.com"
 OKX_INST_TYPE = "SWAP"
@@ -5507,6 +5513,14 @@ def split_long_message(text, max_length=3900):
 
 
 def send_telegram_message(text):
+    """Send a Telegram message without crashing the screener on Telegram outages.
+
+    r33 failed after the analysis was completed because Telegram sendMessage
+    timed out and the shared SESSION retried the POST several times. For the
+    report delivery step we prefer a short, best-effort request: log the error
+    and let GitHub Actions finish successfully so the run results remain usable.
+    """
+
     bot_token, chat_id = get_telegram_credentials()
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -5518,23 +5532,58 @@ def send_telegram_message(text):
         "disable_web_page_preview": True,
     }
 
-    response = SESSION.post(url, json=payload, timeout=20)
+    for attempt in range(1, int(TELEGRAM_SEND_MAX_ATTEMPTS) + 1):
+        try:
+            # Use requests.post directly instead of the shared retrying SESSION.
+            # This avoids long urllib3 POST retries when api.telegram.org is slow.
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=int(TELEGRAM_SEND_TIMEOUT_SECONDS),
+            )
+        except requests.exceptions.RequestException as e:
+            print(
+                "Telegram sendMessage failed (non-fatal): "
+                f"attempt={attempt}/{TELEGRAM_SEND_MAX_ATTEMPTS} error={repr(e)}"
+            )
+            if attempt < int(TELEGRAM_SEND_MAX_ATTEMPTS):
+                time.sleep(float(TELEGRAM_SEND_RETRY_SLEEP_SECONDS))
+                continue
+            return False
 
-    if response.status_code != 200:
-        print("Telegram error response:")
-        print(response.text)
-        raise Exception(f"Telegram sendMessage error: {response.status_code}")
+        if response.status_code == 200:
+            print("Telegram message sent.")
+            return True
 
-    print("Telegram message sent.")
+        print("Telegram error response (non-fatal):")
+        print(response.text[:1000])
+
+        if attempt < int(TELEGRAM_SEND_MAX_ATTEMPTS):
+            time.sleep(float(TELEGRAM_SEND_RETRY_SLEEP_SECONDS))
+            continue
+
+        return False
+
+    return False
 
 
 def send_telegram_message_safe(text):
+    all_sent = True
+
     for index, part in enumerate(split_long_message(text)):
         if index > 0:
             part = f"Part {index + 1}\n\n" + part
 
-        send_telegram_message(part)
-        time.sleep(1)
+        sent = send_telegram_message(part)
+        all_sent = bool(all_sent and sent)
+
+        if index < len(split_long_message(text)) - 1:
+            time.sleep(1)
+
+    if not all_sent:
+        print("WARNING: Telegram delivery failed or was incomplete. Screener analysis completed; this is a delivery-layer issue.")
+
+    return all_sent
 
 
 def prepare_active_output_table(df_active):
