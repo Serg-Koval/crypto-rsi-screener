@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r35"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r36"
 
 RSI_PERIOD = 14
 
@@ -31,6 +31,7 @@ PUMP_WATCH_PRICE_CHANGE_24H = 10
 
 OVERHEAT_WATCH_RSI_1H_LIVE = 82
 OVERHEAT_WATCH_RSI_1H_CLOSED = 80
+OVERHEAT_WATCH_RSI_4H_LIVE = 80
 OVERHEAT_WATCH_PRICE_CHANGE_24H = 15
 OVERHEAT_WATCH_MIN_VOLUME_USD_24H = 5_000_000
 
@@ -368,21 +369,30 @@ def detect_overheat_watch_context(
     rsi_1h_closed,
     exact_volume_24h,
     price_change_24h,
+    rsi_4h_live=None,
 ):
+    """Detect pump + RSI heat context for watchlist visibility.
+
+    r36 update: 4H RSI heat can validate the overheat context even when
+    the 1H RSI has already cooled after the first impulse. This catches
+    cases like UNI where the 4H RSI is still overheated but the 1H live RSI
+    has pulled back below the strict 1H heat pair.
+    """
+
     rsi_1h_live_value = safe_float(rsi_1h_live)
     rsi_1h_closed_value = safe_float(rsi_1h_closed)
+    rsi_4h_live_value = safe_float(rsi_4h_live)
     volume_24h_value = safe_float(exact_volume_24h)
     price_change_24h_value = safe_float(price_change_24h)
 
-    checks = [
-        (
-            rsi_1h_live_value >= OVERHEAT_WATCH_RSI_1H_LIVE,
-            f"RSI 1H live >= {OVERHEAT_WATCH_RSI_1H_LIVE}",
-        ),
-        (
-            rsi_1h_closed_value >= OVERHEAT_WATCH_RSI_1H_CLOSED,
-            f"RSI 1H closed >= {OVERHEAT_WATCH_RSI_1H_CLOSED}",
-        ),
+    has_1h_heat = (
+        rsi_1h_live_value >= OVERHEAT_WATCH_RSI_1H_LIVE
+        and rsi_1h_closed_value >= OVERHEAT_WATCH_RSI_1H_CLOSED
+    )
+    has_4h_heat = rsi_4h_live_value >= OVERHEAT_WATCH_RSI_4H_LIVE
+    has_rsi_heat = bool(has_1h_heat or has_4h_heat)
+
+    common_checks = [
         (
             price_change_24h_value >= OVERHEAT_WATCH_PRICE_CHANGE_24H,
             f"24h change >= {OVERHEAT_WATCH_PRICE_CHANGE_24H}%",
@@ -393,8 +403,20 @@ def detect_overheat_watch_context(
         ),
     ]
 
-    passed = [label for ok, label in checks if ok]
-    missing = [label for ok, label in checks if not ok]
+    rsi_passed = []
+    if has_1h_heat:
+        rsi_passed.append(f"1H RSI heat: live >= {OVERHEAT_WATCH_RSI_1H_LIVE} and closed >= {OVERHEAT_WATCH_RSI_1H_CLOSED}")
+    if has_4h_heat:
+        rsi_passed.append(f"4H RSI heat >= {OVERHEAT_WATCH_RSI_4H_LIVE}")
+
+    passed = [label for ok, label in common_checks if ok] + rsi_passed
+    missing = [label for ok, label in common_checks if not ok]
+
+    if not has_rsi_heat:
+        missing.append(
+            f"RSI heat: 1H live/closed >= {OVERHEAT_WATCH_RSI_1H_LIVE}/{OVERHEAT_WATCH_RSI_1H_CLOSED} "
+            f"or 4H live >= {OVERHEAT_WATCH_RSI_4H_LIVE}"
+        )
 
     is_overheat = len(missing) == 0
 
@@ -402,6 +424,8 @@ def detect_overheat_watch_context(
         "is_overheat": is_overheat,
         "passed": passed,
         "missing": missing,
+        "has_1h_heat": bool(has_1h_heat),
+        "has_4h_heat": bool(has_4h_heat),
         "reason": " + ".join(passed) if is_overheat else "Missing " + " / ".join(missing),
     }
 
@@ -3841,6 +3865,7 @@ def calculate_scores(
     overheat_context = detect_overheat_watch_context(
         rsi_1h_live=rsi_1h_live_value,
         rsi_1h_closed=rsi_1h_closed_value,
+        rsi_4h_live=rsi_4h_live_value,
         exact_volume_24h=volume_24h_value,
         price_change_24h=price_change_24h_value,
     )
@@ -4589,11 +4614,13 @@ def format_oi_line_for_telegram(detail):
 
     # Raw weak/mixed OI lines are hidden because they add noise. Show only
     # actionable context that can help interpret a pump.
+    source_prefix = "OKX fallback — " if source == "OKX_fallback" else ""
+
     if context == "Long build-up":
-        return f"OI: Long build-up ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
+        return f"OI: {source_prefix}Long build-up ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
     if context == "Short squeeze / OI unwind":
-        return f"OI: OI unwind ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
+        return f"OI: {source_prefix}OI unwind ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
     return ""
 
@@ -5270,22 +5297,57 @@ def bitget_get_open_interest(symbol):
     return None
 
 
-def bitget_get_open_interest_metrics(symbol):
-    # Bitget public Futures API exposes current OI. The official v2 Futures
-    # market docs do not provide a per-symbol historical OI endpoint equivalent
-    # to OKX Rubik history, so 1H/4H changes remain N/A until we add persistent
-    # snapshots or a separate approved historical data source.
+def bitget_symbol_to_okx_inst_id(symbol):
+    text = str(symbol or "").upper().strip()
+
+    if text.endswith("USDT"):
+        base = text[:-4]
+        return f"{base}-USDT-SWAP"
+
+    return ""
+
+
+def bitget_get_open_interest_metrics(symbol, allow_okx_fallback=False):
+    # Bitget public Futures API exposes current OI, but not enough historical
+    # OI for 1H/4H changes. r36 can optionally try OKX historical OI as a
+    # fallback for the same TradingView symbol when the candidate is already
+    # hot enough for OI divergence to matter.
     try:
         current_oi = bitget_get_open_interest(symbol)
     except Exception as e:
         print(f"Bitget OI current unavailable for {symbol}: {e}")
         current_oi = None
 
-    return build_open_interest_metrics(
+    bitget_metrics = build_open_interest_metrics(
         history_df=pd.DataFrame(columns=["timestamp", "open_interest"]),
         current_oi=current_oi,
         provider="Bitget_current",
     )
+
+    if allow_okx_fallback:
+        okx_inst_id = bitget_symbol_to_okx_inst_id(symbol)
+
+        if okx_inst_id:
+            try:
+                fallback_metrics = okx_get_open_interest_metrics(okx_inst_id)
+
+                if str(fallback_metrics.get("oi_status")) == "ok" and int(fallback_metrics.get("oi_history_points", 0) or 0) > 0:
+                    fallback_metrics["oi_source"] = "OKX_fallback"
+                    fallback_metrics["oi_fallback_symbol"] = okx_inst_id
+                    fallback_metrics["oi_fallback_for_exchange"] = "Bitget"
+                    return fallback_metrics
+
+                print(
+                    "Bitget OI OKX fallback unavailable",
+                    f"symbol={symbol}",
+                    f"okx_inst_id={okx_inst_id}",
+                    f"status={fallback_metrics.get('oi_status')}",
+                    f"history_points={fallback_metrics.get('oi_history_points')}",
+                )
+            except Exception as e:
+                print(f"Bitget OI OKX fallback failed for {symbol} ({okx_inst_id}): {e}")
+
+    return bitget_metrics
 
 
 def bitget_build_market_universe():
@@ -5354,7 +5416,19 @@ def bitget_analyze_candidate(symbol, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    oi_metrics = bitget_get_open_interest_metrics(symbol)
+    potential_overheat = detect_overheat_watch_context(
+        rsi_1h_live=rsi_1h_live,
+        rsi_1h_closed=rsi_1h_closed,
+        rsi_4h_live=rsi_4h_live,
+        exact_volume_24h=exact_volume_24h,
+        price_change_24h=price_change_24h,
+    )
+
+    oi_metrics = bitget_get_open_interest_metrics(
+        symbol,
+        allow_okx_fallback=bool(potential_overheat.get("is_overheat", False)),
+    )
+    oi_provider_for_divergence = str(oi_metrics.get("oi_source") or "Bitget")
 
     short_analysis = analyze_short_factors(
         df_1h,
@@ -5362,7 +5436,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
         df_1d=df_1d,
         current_price=price,
         oi_history=oi_metrics.get("oi_history_df"),
-        provider="Bitget",
+        provider=oi_provider_for_divergence,
     )
 
     classification = classify_signal(
@@ -7927,6 +8001,57 @@ def run_rsi_entry_filter_self_tests():
 
 
 
+
+def run_overheat_context_self_tests():
+    print("RUNNING OVERHEAT CONTEXT SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+
+    tests = [
+        (
+            "4H RSI heat passes even after 1H cools",
+            detect_overheat_watch_context(
+                rsi_1h_live=66,
+                rsi_1h_closed=72,
+                rsi_4h_live=80.5,
+                exact_volume_24h=10_000_000,
+                price_change_24h=16,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "1H RSI heat still passes",
+            detect_overheat_watch_context(
+                rsi_1h_live=83,
+                rsi_1h_closed=81,
+                rsi_4h_live=70,
+                exact_volume_24h=10_000_000,
+                price_change_24h=16,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "RSI heat blocked without pump context",
+            detect_overheat_watch_context(
+                rsi_1h_live=83,
+                rsi_1h_closed=81,
+                rsi_4h_live=82,
+                exact_volume_24h=10_000_000,
+                price_change_24h=9,
+            ).get("is_overheat") is False,
+        ),
+    ]
+
+    failed = 0
+    for name, ok in tests:
+        if ok:
+            print(f"PASS | {name}")
+        else:
+            failed += 1
+            print(f"FAIL | {name}")
+
+    if failed:
+        raise AssertionError(f"Overheat context self-tests failed: {failed}/{len(tests)}")
+
+    print(f"OVERHEAT CONTEXT SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
 def run_open_interest_self_tests():
     print("RUNNING OPEN INTEREST SELF TESTS")
     print("SCRIPT VERSION:", SCRIPT_VERSION)
@@ -8134,6 +8259,7 @@ def main():
         run_rejection_self_tests()
         run_local_high_self_tests()
         run_rsi_entry_filter_self_tests()
+        run_overheat_context_self_tests()
         run_open_interest_self_tests()
         run_rsi_divergence_self_tests()
         run_oi_divergence_self_tests()
