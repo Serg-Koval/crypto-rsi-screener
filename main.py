@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r34"
+SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r35"
 
 RSI_PERIOD = 14
 
@@ -4034,12 +4034,18 @@ def build_setup_status(signal_level, scores, short_factors):
         if has_overheat_context and has_divergence and not (liquidity_confirmed or rejection_confirmed):
             return f"Short watch — RSI heat + {div_text}; waiting for short trigger"
         if liquidity_confirmed and rejection_confirmed:
+            if has_divergence:
+                return f"Short watch — liquidity sweep + open-level rejection + {div_text}"
             return "Short watch — liquidity sweep + open-level rejection"
         if liquidity_confirmed:
+            if has_divergence:
+                return f"Short watch — liquidity sweep + {div_text}"
             if has_open_resistance:
                 return "Short watch — liquidity sweep + open resistance"
             return "Short watch — confirmed liquidity sweep detected"
         if rejection_confirmed:
+            if has_divergence:
+                return f"Short watch — open-level rejection + {div_text}"
             return "Short watch — open-level rejection"
         return "Short watch — watchlist context"
 
@@ -6627,7 +6633,8 @@ def format_multi_provider_telegram(
             sweep_detail = html.escape(format_sweep_detail_for_telegram(short_factors))
             rejection_detail = html.escape(format_rejection_detail_for_telegram(short_factors))
 
-            reason = html.escape(format_reason_for_telegram(setup_status))
+            reason_source = detail.get("reason") or setup_status
+            reason = html.escape(format_reason_for_telegram(reason_source))
 
             lines.append("")
             lines.append(f"{idx + 1}) {signal_label} — <code>{symbol}</code>")
