@@ -2,12 +2,22 @@
 """
 Bybit public API connectivity test for GitHub Actions.
 
+Version: dual-endpoint-v2-20260616
+
 Purpose:
 - Check whether GitHub-hosted runner can reach Bybit public V5 market API.
+- Test both official public endpoints:
+    1) https://api.bybit.com
+    2) https://api.bytick.com
 - Verify instruments, tickers, kline and open-interest endpoints.
 - Print enough diagnostics to understand if failure is CloudFront / regional / network / JSON/API-level.
 
 No API keys are required.
+
+Optional env vars:
+- BYBIT_TEST_TIMEOUT=15
+- BYBIT_TEST_SYMBOLS=BTCUSDT,WLDUSDT,UNIUSDT
+- BYBIT_BASE_URLS=https://api.bybit.com,https://api.bytick.com
 """
 
 from __future__ import annotations
@@ -17,18 +27,27 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 import requests
 
-BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").rstrip("/")
+DEFAULT_BASE_URLS = "https://api.bybit.com,https://api.bytick.com"
+BASE_URLS = [
+    url.strip().rstrip("/")
+    for url in os.getenv("BYBIT_BASE_URLS", DEFAULT_BASE_URLS).split(",")
+    if url.strip()
+]
 TIMEOUT = float(os.getenv("BYBIT_TEST_TIMEOUT", "15"))
-SYMBOLS = [s.strip().upper() for s in os.getenv("BYBIT_TEST_SYMBOLS", "BTCUSDT,WLDUSDT,UNIUSDT").split(",") if s.strip()]
+SYMBOLS = [
+    s.strip().upper()
+    for s in os.getenv("BYBIT_TEST_SYMBOLS", "BTCUSDT,WLDUSDT,UNIUSDT").split(",")
+    if s.strip()
+]
 
 SESSION = requests.Session()
 SESSION.headers.update(
     {
-        "User-Agent": "market-heat-scanner-bybit-connectivity-test/1.0",
+        "User-Agent": "market-heat-scanner-bybit-connectivity-test/1.1",
         "Accept": "application/json,text/plain,*/*",
     }
 )
@@ -36,6 +55,7 @@ SESSION.headers.update(
 
 @dataclass
 class TestResult:
+    base_url: str
     name: str
     url: str
     ok_http: bool = False
@@ -70,12 +90,18 @@ def is_cloudfront_block(text: str) -> bool:
     return any(m in lower for m in markers)
 
 
-def call_endpoint(name: str, path: str, params: Optional[Dict[str, Any]] = None) -> TestResult:
-    url = f"{BASE_URL}{path}"
-    result = TestResult(name=name, url=url)
+def call_endpoint(
+    base_url: str,
+    name: str,
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> TestResult:
+    url = f"{base_url}{path}"
+    result = TestResult(base_url=base_url, name=name, url=url)
     start = time.monotonic()
 
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 110)
+    print(f"BASE_URL: {base_url}")
     print(f"TEST: {name}")
     print(f"GET:  {url}")
     if params:
@@ -101,13 +127,13 @@ def call_endpoint(name: str, path: str, params: Optional[Dict[str, Any]] = None)
             result.ok_retcode = result.ret_code == 0
             print(f"JSON: ok | retCode={result.ret_code} | retMsg={data.get('retMsg')}")
 
-            # Print a compact result shape for useful endpoints.
             payload = data.get("result")
             if isinstance(payload, dict):
                 if isinstance(payload.get("list"), list):
-                    print(f"RESULT_LIST_LEN: {len(payload.get('list'))}")
-                    if payload.get("list"):
-                        print(f"FIRST_ITEM: {short_text(json.dumps(payload.get('list')[0], ensure_ascii=False), 700)}")
+                    items = payload.get("list") or []
+                    print(f"RESULT_LIST_LEN: {len(items)}")
+                    if items:
+                        print(f"FIRST_ITEM: {short_text(json.dumps(items[0], ensure_ascii=False), 700)}")
                 else:
                     print(f"RESULT_KEYS: {sorted(payload.keys())}")
         except Exception as exc:  # noqa: BLE001
@@ -130,20 +156,26 @@ def call_endpoint(name: str, path: str, params: Optional[Dict[str, Any]] = None)
     return result
 
 
-def main() -> int:
-    print("Bybit public API connectivity test")
-    print(f"BASE_URL={BASE_URL}")
-    print(f"TIMEOUT={TIMEOUT}")
-    print(f"SYMBOLS={SYMBOLS}")
-    print(f"PYTHON={sys.version}")
-
+def build_tests() -> list[tuple[str, str, Optional[Dict[str, Any]]]]:
     tests: list[tuple[str, str, Optional[Dict[str, Any]]]] = [
         ("server_time", "/v5/market/time", None),
         ("linear_instruments_sample", "/v5/market/instruments-info", {"category": "linear", "limit": "5"}),
         ("btc_ticker", "/v5/market/tickers", {"category": "linear", "symbol": "BTCUSDT"}),
-        ("btc_kline_1h", "/v5/market/kline", {"category": "linear", "symbol": "BTCUSDT", "interval": "60", "limit": "5"}),
-        ("btc_open_interest_1h", "/v5/market/open-interest", {"category": "linear", "symbol": "BTCUSDT", "intervalTime": "1h", "limit": "5"}),
-        ("btc_open_interest_4h", "/v5/market/open-interest", {"category": "linear", "symbol": "BTCUSDT", "intervalTime": "4h", "limit": "5"}),
+        (
+            "btc_kline_1h",
+            "/v5/market/kline",
+            {"category": "linear", "symbol": "BTCUSDT", "interval": "60", "limit": "5"},
+        ),
+        (
+            "btc_open_interest_1h",
+            "/v5/market/open-interest",
+            {"category": "linear", "symbol": "BTCUSDT", "intervalTime": "1h", "limit": "5"},
+        ),
+        (
+            "btc_open_interest_4h",
+            "/v5/market/open-interest",
+            {"category": "linear", "symbol": "BTCUSDT", "intervalTime": "4h", "limit": "5"},
+        ),
     ]
 
     for symbol in SYMBOLS:
@@ -153,37 +185,117 @@ def main() -> int:
             [
                 (f"{symbol}_instrument", "/v5/market/instruments-info", {"category": "linear", "symbol": symbol}),
                 (f"{symbol}_ticker", "/v5/market/tickers", {"category": "linear", "symbol": symbol}),
-                (f"{symbol}_kline_1h", "/v5/market/kline", {"category": "linear", "symbol": symbol, "interval": "60", "limit": "5"}),
-                (f"{symbol}_open_interest_1h", "/v5/market/open-interest", {"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": "5"}),
-                (f"{symbol}_open_interest_4h", "/v5/market/open-interest", {"category": "linear", "symbol": symbol, "intervalTime": "4h", "limit": "5"}),
+                (
+                    f"{symbol}_kline_1h",
+                    "/v5/market/kline",
+                    {"category": "linear", "symbol": symbol, "interval": "60", "limit": "5"},
+                ),
+                (
+                    f"{symbol}_open_interest_1h",
+                    "/v5/market/open-interest",
+                    {"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": "5"},
+                ),
+                (
+                    f"{symbol}_open_interest_4h",
+                    "/v5/market/open-interest",
+                    {"category": "linear", "symbol": symbol, "intervalTime": "4h", "limit": "5"},
+                ),
             ]
         )
+    return tests
 
-    results = [call_endpoint(name, path, params) for name, path, params in tests]
 
-    print("\n" + "=" * 100)
-    print("SUMMARY")
+def endpoint_status(results: list[TestResult]) -> str:
     passed = [r for r in results if r.passed]
     cloudfront = [r for r in results if r.cloudfront_block or r.status_code == 403]
+    market_passed = [
+        r for r in passed
+        if any(marker in r.name for marker in ["server_time", "instrument", "ticker", "kline"])
+    ]
     oi_passed = [r for r in passed if "open_interest" in r.name]
 
-    print(f"TOTAL_TESTS={len(results)}")
-    print(f"PASSED={len(passed)}")
-    print(f"HTTP_403_OR_CLOUDFRONT={len(cloudfront)}")
-    print(f"OI_TESTS_PASSED={len(oi_passed)}")
-
     if cloudfront and not passed:
-        print("FINAL_STATUS=BLOCKED_BY_CDN_OR_REGION")
-        return 2
+        return "BLOCKED_BY_CDN_OR_REGION"
     if not passed:
-        print("FINAL_STATUS=NO_SUCCESSFUL_BYBIT_ENDPOINTS")
-        return 1
-    if not oi_passed:
-        print("FINAL_STATUS=MARKET_API_REACHABLE_BUT_OI_FAILED")
-        return 1
+        return "NO_SUCCESSFUL_BYBIT_ENDPOINTS"
+    if market_passed and not oi_passed:
+        return "MARKET_API_REACHABLE_BUT_OI_FAILED"
+    if market_passed and oi_passed:
+        return "BYBIT_PUBLIC_MARKET_AND_OI_API_REACHABLE"
+    return "PARTIAL_SUCCESS_NEEDS_REVIEW"
 
-    print("FINAL_STATUS=BYBIT_PUBLIC_MARKET_AND_OI_API_REACHABLE")
-    return 0
+
+def main() -> int:
+    print("Bybit public API connectivity test | dual-endpoint-v2-20260616")
+    print(f"BASE_URLS={BASE_URLS}")
+    print(f"TIMEOUT={TIMEOUT}")
+    print(f"SYMBOLS={SYMBOLS}")
+    print(f"PYTHON={sys.version}")
+
+    tests = build_tests()
+    all_results: list[TestResult] = []
+    endpoint_results: dict[str, list[TestResult]] = {}
+
+    for base_url in BASE_URLS:
+        print("\n" + "#" * 110)
+        print(f"START ENDPOINT TEST: {base_url}")
+        print("#" * 110)
+        results = [call_endpoint(base_url, name, path, params) for name, path, params in tests]
+        endpoint_results[base_url] = results
+        all_results.extend(results)
+
+    print("\n" + "=" * 110)
+    print("SUMMARY BY ENDPOINT")
+
+    any_full_success = False
+    any_market_success = False
+    all_blocked = True
+
+    for base_url, results in endpoint_results.items():
+        passed = [r for r in results if r.passed]
+        cloudfront = [r for r in results if r.cloudfront_block or r.status_code == 403]
+        oi_passed = [r for r in passed if "open_interest" in r.name]
+        status = endpoint_status(results)
+
+        if passed:
+            all_blocked = False
+        if status in {"BYBIT_PUBLIC_MARKET_AND_OI_API_REACHABLE", "MARKET_API_REACHABLE_BUT_OI_FAILED"}:
+            any_market_success = True
+        if status == "BYBIT_PUBLIC_MARKET_AND_OI_API_REACHABLE":
+            any_full_success = True
+
+        print("-" * 110)
+        print(f"ENDPOINT={base_url}")
+        print(f"TOTAL_TESTS={len(results)}")
+        print(f"PASSED={len(passed)}")
+        print(f"HTTP_403_OR_CLOUDFRONT={len(cloudfront)}")
+        print(f"OI_TESTS_PASSED={len(oi_passed)}")
+        print(f"ENDPOINT_STATUS={status}")
+
+    print("\n" + "=" * 110)
+    print("OVERALL SUMMARY")
+    passed_all = [r for r in all_results if r.passed]
+    cloudfront_all = [r for r in all_results if r.cloudfront_block or r.status_code == 403]
+    oi_passed_all = [r for r in passed_all if "open_interest" in r.name]
+
+    print(f"TOTAL_ENDPOINTS={len(BASE_URLS)}")
+    print(f"TOTAL_TESTS={len(all_results)}")
+    print(f"PASSED={len(passed_all)}")
+    print(f"HTTP_403_OR_CLOUDFRONT={len(cloudfront_all)}")
+    print(f"OI_TESTS_PASSED={len(oi_passed_all)}")
+
+    if any_full_success:
+        print("FINAL_STATUS=AT_LEAST_ONE_BYBIT_ENDPOINT_FULLY_REACHABLE")
+        return 0
+    if any_market_success:
+        print("FINAL_STATUS=BYBIT_MARKET_REACHABLE_BUT_OI_NOT_CONFIRMED")
+        return 1
+    if all_blocked and cloudfront_all:
+        print("FINAL_STATUS=ALL_BYBIT_ENDPOINTS_BLOCKED_BY_CDN_OR_REGION")
+        return 2
+
+    print("FINAL_STATUS=NO_SUCCESSFUL_BYBIT_ENDPOINTS")
+    return 1
 
 
 if __name__ == "__main__":
