@@ -29,7 +29,7 @@ Cloudflare Worker (ladovka-screener-dispatcher)
 - Worker (`worker.js`) нічого не рахує. Він запускає GitHub workflow через `workflow_dispatch`, відповідає на команди `/run`, `/status`, `/start`, `/chatid` і приймає вебхук Telegram на `POST /telegram`. Робочі команди приймаються лише з чату `ALLOWED_CHAT_ID`; вебхук перевіряється секретом `X-Telegram-Bot-Api-Secret-Token`.
 - `screener.yml` має лише тригер `workflow_dispatch`. Розкладу в самому GitHub немає, розклад задає cron у Cloudflare.
 - Секрети GitHub: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Секрети Worker: `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_WORKFLOW`, `GITHUB_REF`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ALLOWED_CHAT_ID`.
-- Залежності Python: `requests`, `pandas`, `numpy`, `urllib3`. Python 3.11.
+- Залежності Python закріплені в `requirements.txt`: `requests==2.34.2`, `pandas==3.0.6`, `numpy==2.4.6`, `urllib3==2.8.0` (версії з успішного запуску Actions 2026-10-10). Python 3.11. Оновлювати версії лише свідомо, з прогоном `--self-test` і `tests/golden_test.py`.
 - `worker.js` у репозиторії відсутній. Його копія лежить у документах Claude Project. Це варто мати на увазі, бо правки Worker не потрапляють у git автоматично.
 
 ## 3. Поточний стан коду (важливо)
