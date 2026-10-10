@@ -4323,7 +4323,7 @@ def okx_get_open_interest_history(inst_id, period=OI_HISTORY_PERIOD):
     if not base_ccy:
         return pd.DataFrame(columns=["timestamp", "open_interest"])
 
-    now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
+    now_ms = int(pd.Timestamp.now("UTC").timestamp() * 1000)
     begin_ms = now_ms - int(OI_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1000)
 
     # OKX historical contract OI is exposed through the Trading Data
@@ -5208,15 +5208,16 @@ def send_telegram_message(text):
 
 def send_telegram_message_safe(text):
     all_sent = True
+    parts = split_long_message(text)
 
-    for index, part in enumerate(split_long_message(text)):
+    for index, part in enumerate(parts):
         if index > 0:
             part = f"Part {index + 1}\n\n" + part
 
         sent = send_telegram_message(part)
         all_sent = bool(all_sent and sent)
 
-        if index < len(split_long_message(text)) - 1:
+        if index < len(parts) - 1:
             time.sleep(1)
 
     if not all_sent:
