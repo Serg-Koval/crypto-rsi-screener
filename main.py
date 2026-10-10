@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 
 from datetime import datetime
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -18,7 +19,7 @@ from urllib3.util.retry import Retry
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "p0-sweep-v4-compact-20260613-r36"
+SCRIPT_VERSION = "bybit-proxy-v1-20261010-r37"
 
 RSI_PERIOD = 14
 
@@ -98,8 +99,6 @@ REJECTION_MAX_CLOSE_POSITION_PCT = 0.55
 
 # Open Interest context layer (r28).
 # Context only: it is shown in Telegram but does not affect scoring yet.
-OI_HISTORY_PERIOD = "1H"
-OI_HISTORY_LOOKBACK_HOURS = 12
 OI_CHANGE_FLAT_THRESHOLD_PCT = 2.0
 OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT = 3.0
 OI_CHANGE_STRONG_4H_THRESHOLD_PCT = 10.0
@@ -149,12 +148,22 @@ TELEGRAM_SEND_TIMEOUT_SECONDS = 10
 TELEGRAM_SEND_MAX_ATTEMPTS = 1
 TELEGRAM_SEND_RETRY_SLEEP_SECONDS = 2
 
-OKX_BASE_URL = "https://www.okx.com"
-OKX_INST_TYPE = "SWAP"
-OKX_SETTLE_CCY = "USDT"
+# Bybit data comes through the Cloudflare Worker proxy (GitHub Actions cannot
+# reach api.bybit.com directly). Requests: <BYBIT_PROXY_URL>/bybit/v5/market/...
+# with the X-Proxy-Secret header; both values come from environment variables.
+BYBIT_PROXY_PATH_PREFIX = "/bybit"
+BYBIT_PROXY_SECRET_HEADER = "X-Proxy-Secret"
+BYBIT_CATEGORY = "linear"
+BYBIT_CONTRACT_TYPE = "LinearPerpetual"
+BYBIT_QUOTE_COIN = "USDT"
+BYBIT_STATUS = "Trading"
+BYBIT_INTERVALS = {"1H": "60", "4H": "240", "1D": "D"}
+BYBIT_OI_INTERVAL = "1h"
+BYBIT_OI_HISTORY_LIMIT = 200
 
-BITGET_BASE_URL = "https://api.bitget.com"
-BITGET_PRODUCT_TYPE = "usdt-futures"
+# Data quality: if more than this share of candidates failed to analyze,
+# the report is not sent and the run fails (see classify_data_quality).
+DATA_ERROR_MAX_SHARE = 0.5
 
 
 # ============================================================
@@ -193,12 +202,12 @@ SESSION = create_session()
 # COMMON HELPERS
 # ============================================================
 
-def safe_get_json(base_url, endpoint, params=None, provider_name="provider"):
+def safe_get_json(base_url, endpoint, params=None, provider_name="provider", headers=None):
     if params is None:
         params = {}
 
     url = base_url + endpoint
-    response = SESSION.get(url, params=params, timeout=20)
+    response = SESSION.get(url, params=params, headers=headers, timeout=20)
 
     if response.status_code != 200:
         print(f"{provider_name} HTTP error:", response.status_code)
@@ -423,12 +432,12 @@ def get_last_closed_candle_for_analysis(df):
     """
     Return the last closed candle for factor analysis.
 
-    OKX has explicit confirm flag:
+    A dataframe may carry an explicit confirm flag:
     - confirm = 0 means live candle;
     - confirm = 1 means closed candle.
 
-    Other providers may not expose confirm in the normalized dataframe.
-    In that case, the safest generic assumption is:
+    Bybit candles do not expose confirm in the normalized dataframe.
+    In that case, the safe assumption is:
     - last row = live/current candle;
     - previous row = last closed candle.
     """
@@ -1326,8 +1335,8 @@ def get_closed_candles_dataframe_for_analysis(df):
     """
     Return a dataframe of closed candles only.
 
-    OKX exposes confirm=1 for closed candles. Bitget does not, so for generic
-    providers the latest row is treated as live and excluded.
+    If a confirm column exists, confirm=1 marks closed candles. Bybit candles
+    have no such column, so the latest row is treated as live and excluded.
     """
 
     if df is None or df.empty:
@@ -1821,12 +1830,6 @@ def detect_oi_bearish_divergence_for_timeframe(df, oi_history, timeframe="1H"):
 
 
 def detect_oi_bearish_divergence(df_1h=None, df_4h=None, oi_history=None, provider="provider"):
-    if str(provider).lower().startswith("bitget"):
-        factor = make_factor("oi_divergence", "OI divergence", "not_available", points=0, detail="Bitget history not supported")
-        factor["events"] = []
-        factor["provider"] = str(provider)
-        return factor
-
     item_1h = detect_oi_bearish_divergence_for_timeframe(df_1h, oi_history, timeframe="1H") if df_1h is not None else {
         "status": "not_enough_data", "timeframe": "1H", "detail": "1H unavailable"
     }
@@ -1895,7 +1898,7 @@ def normalize_intraday_candles_for_open_levels(df):
     Exchange candles are normalized as UTC timestamps in the dataframe.
     r25 uses intraday UTC period starts for D/W/M/Y opens because the
     TradingView open-level drawings shown in validation screenshots match
-    exchange/TradingView UTC session opens better than OKX 1D candles or
+    exchange/TradingView UTC session opens better than exchange 1D candles or
     Kyiv-local period starts.
     """
 
@@ -1909,7 +1912,7 @@ def normalize_intraday_candles_for_open_levels(df):
     timestamps = pd.to_datetime(work_df["timestamp"], errors="coerce")
 
     try:
-        # OKX/Bitget timestamps are UTC but stored as timezone-naive values.
+        # Bybit timestamps are UTC but stored as timezone-naive values.
         if timestamps.dt.tz is None:
             timestamps_utc = timestamps.dt.tz_localize("UTC")
         else:
@@ -2122,8 +2125,8 @@ def get_recent_closed_candles_for_analysis(df, window_bars):
     """
     Return recent closed candles as (candle, index) pairs.
 
-    For providers with explicit confirm flag, use the latest confirm=1 candles.
-    For normalized providers without confirm, treat the last row as live and use
+    With an explicit confirm flag, use the latest confirm=1 candles.
+    Without confirm (Bybit), treat the last row as live and use
     candles before it as closed.
     """
 
@@ -3964,16 +3967,6 @@ def extract_oi_value_from_row(row):
     ]
 
     if isinstance(row, dict):
-        # Bitget current OI response nests the actual value inside
-        # data.openInterestList[0].size. Parse nested lists first instead of
-        # trying to cast the whole list to float.
-        nested_list = row.get("openInterestList")
-        if isinstance(nested_list, list):
-            for nested_item in nested_list:
-                nested_value = extract_oi_value_from_row(nested_item)
-                if nested_value is not None:
-                    return nested_value
-
         # Some wrappers return a generic data list with OI rows.
         nested_data = row.get("data")
         if isinstance(nested_data, list):
@@ -4183,315 +4176,220 @@ def format_oi_line_for_telegram(detail):
     if not isinstance(detail, dict):
         return ""
 
-    source = str(detail.get("oi_source", detail.get("exchange", "")) or "")
     context = str(detail.get("oi_context", "N/A") or "N/A")
     change_1h = detail.get("oi_change_1h_percent")
     change_4h = detail.get("oi_change_4h_percent")
 
-    if source.lower().startswith("bitget"):
-        return "OI: unavailable — Bitget history not supported"
-
     # Raw weak/mixed OI lines are hidden because they add noise. Show only
     # actionable context that can help interpret a pump.
-    source_prefix = "OKX fallback — " if source == "OKX_fallback" else ""
-
     if context == "Long build-up":
-        return f"OI: {source_prefix}Long build-up ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
+        return f"OI: Long build-up ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
     if context == "Short squeeze / OI unwind":
-        return f"OI: {source_prefix}OI unwind ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
+        return f"OI: OI unwind ({format_oi_percent_for_telegram(change_1h)} 1H / {format_oi_percent_for_telegram(change_4h)} 4H)"
 
     return ""
 
 # ============================================================
-# OKX PROVIDER
+# BYBIT PROVIDER (via Cloudflare Worker proxy)
 # ============================================================
 
-def okx_get_all_instruments():
+def get_bybit_proxy_config():
+    """Read the proxy URL and secret from the environment.
+
+    GitHub Actions cannot reach api.bybit.com directly (HTTP 403, geo block),
+    so every Bybit request goes through the Cloudflare Worker proxy. Values are
+    never printed: the error message only names the missing variables.
+    """
+
+    base_url = (os.getenv("BYBIT_PROXY_URL") or "").strip().rstrip("/")
+    secret = (os.getenv("BYBIT_PROXY_SECRET") or "").strip()
+
+    missing = []
+
+    if not base_url:
+        missing.append("BYBIT_PROXY_URL")
+
+    if not secret:
+        missing.append("BYBIT_PROXY_SECRET")
+
+    if missing:
+        raise RuntimeError(
+            "Bybit proxy is not configured. Missing environment variables: "
+            + ", ".join(missing)
+        )
+
+    return base_url, secret
+
+
+def redact_proxy_details(text):
+    """Hide the proxy URL, its host and the secret in text that goes to logs.
+
+    GitHub masks only the exact secret value, but exception messages from
+    requests can contain a part of it (for example the host name).
+    """
+
+    text = str(text)
+    hidden = []
+
+    url = (os.getenv("BYBIT_PROXY_URL") or "").strip().rstrip("/")
+    secret = (os.getenv("BYBIT_PROXY_SECRET") or "").strip()
+
+    if url:
+        hidden.append(url)
+
+        try:
+            parsed = urlparse(url)
+            hidden.extend([parsed.netloc, parsed.hostname or ""])
+        except ValueError:
+            pass
+
+    if secret:
+        hidden.append(secret)
+
+    for value in sorted({v for v in hidden if v}, key=len, reverse=True):
+        text = text.replace(value, "***")
+
+    return text
+
+
+def bybit_success(data):
+    return str(data.get("retCode")) == "0"
+
+
+def bybit_get(endpoint, params, label="Bybit"):
+    base_url, secret = get_bybit_proxy_config()
+
     data = safe_get_json(
-        base_url=OKX_BASE_URL,
-        endpoint="/api/v5/public/instruments",
-        params={"instType": OKX_INST_TYPE},
-        provider_name="OKX",
+        base_url=base_url + BYBIT_PROXY_PATH_PREFIX,
+        endpoint=endpoint,
+        params=params,
+        provider_name=label,
+        headers={BYBIT_PROXY_SECRET_HEADER: secret},
     )
 
-    if data.get("code") != "0":
-        raise Exception(f"OKX API error: {data.get('msg')}")
-
-    return data["data"]
-
-
-def okx_get_all_tickers():
-    data = safe_get_json(
-        base_url=OKX_BASE_URL,
-        endpoint="/api/v5/market/tickers",
-        params={"instType": OKX_INST_TYPE},
-        provider_name="OKX",
-    )
-
-    if data.get("code") != "0":
-        raise Exception(f"OKX API error: {data.get('msg')}")
-
-    return data["data"]
-
-
-def okx_get_candles(inst_id, bar, limit):
-    data = safe_get_json(
-        base_url=OKX_BASE_URL,
-        endpoint="/api/v5/market/candles",
-        params={
-            "instId": inst_id,
-            "bar": bar,
-            "limit": limit,
-        },
-        provider_name="OKX",
-    )
-
-    if data.get("code") != "0":
-        raise Exception(f"OKX API error: {data.get('msg')}")
+    if not bybit_success(data):
+        raise Exception(f"{label} API error: retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
 
     return data
 
 
-def okx_instruments_to_dataframe(instruments):
+def bybit_result_list(data):
+    result = data.get("result") or {}
+    rows = result.get("list")
+
+    return rows if isinstance(rows, list) else []
+
+
+def bybit_get_instruments():
+    data = bybit_get(
+        "/v5/market/instruments-info",
+        {"category": BYBIT_CATEGORY, "limit": 1000},
+        label="Bybit instruments",
+    )
+
+    if (data.get("result") or {}).get("nextPageCursor"):
+        print("WARNING: Bybit instruments-info has more pages; only the first 1000 instruments are used.")
+
+    return bybit_result_list(data)
+
+
+def bybit_get_tickers():
+    data = bybit_get(
+        "/v5/market/tickers",
+        {"category": BYBIT_CATEGORY},
+        label="Bybit tickers",
+    )
+
+    return bybit_result_list(data)
+
+
+def bybit_get_candles(symbol, interval, limit):
+    data = bybit_get(
+        "/v5/market/kline",
+        {
+            "category": BYBIT_CATEGORY,
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        },
+        label="Bybit kline",
+    )
+
+    return bybit_result_list(data)
+
+
+def bybit_instruments_to_dataframe(instruments):
     df = pd.DataFrame(instruments)
 
+    if df.empty:
+        return df
+
+    for column in ["symbol", "contractType", "quoteCoin", "status"]:
+        if column not in df.columns:
+            raise Exception(f"Bybit instruments response has no {column} column.")
+
     df = df[
-        (df["instType"] == OKX_INST_TYPE)
-        & (df["settleCcy"] == OKX_SETTLE_CCY)
-        & (df["state"] == "live")
-        & (df["instId"].str.endswith("-USDT-SWAP"))
+        (df["contractType"] == BYBIT_CONTRACT_TYPE)
+        & (df["quoteCoin"] == BYBIT_QUOTE_COIN)
+        & (df["status"] == BYBIT_STATUS)
     ].copy()
+
+    df["symbol"] = df["symbol"].astype(str)
 
     return df.reset_index(drop=True)
 
 
-def okx_tickers_to_dataframe(tickers):
+def bybit_tickers_to_dataframe(tickers):
     df = pd.DataFrame(tickers)
 
-    numeric_columns = [
-        "last",
-        "open24h",
-        "high24h",
-        "low24h",
-        "vol24h",
-        "volCcy24h",
-        "volCcyQuote24h",
-    ]
+    if df.empty:
+        return df
 
-    for col in numeric_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for column in ["symbol", "lastPrice", "price24hPcnt", "turnover24h"]:
+        if column not in df.columns:
+            raise Exception(f"Bybit tickers response has no {column} column.")
 
-    if "ts" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
+    df["symbol"] = df["symbol"].astype(str)
+    df["price"] = pd.to_numeric(df["lastPrice"], errors="coerce")
+    # Bybit returns the 24h change as a ratio: 0.1273 = 12.73%.
+    df["price_change_24h_percent"] = pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
+    # turnover24h is already in USDT for linear contracts.
+    df["volume_usd_24h_est"] = pd.to_numeric(df["turnover24h"], errors="coerce")
 
-    return df
+    return df[["symbol", "price", "price_change_24h_percent", "volume_usd_24h_est"]].reset_index(drop=True)
 
 
-def okx_get_open_interest(inst_id):
-    data = safe_get_json(
-        base_url=OKX_BASE_URL,
-        endpoint="/api/v5/public/open-interest",
-        params={
-            "instType": OKX_INST_TYPE,
-            "instId": inst_id,
-        },
-        provider_name="OKX OI",
-    )
+def bybit_build_market_universe():
+    instruments = bybit_get_instruments()
+    tickers = bybit_get_tickers()
 
-    if data.get("code") != "0":
-        raise Exception(f"OKX OI API error: {data.get('msg')}")
+    if not instruments:
+        raise Exception("Bybit returned an empty instruments list.")
 
-    rows = data.get("data", [])
-    if not rows:
-        return None
+    if not tickers:
+        raise Exception("Bybit returned an empty tickers list.")
 
-    return extract_oi_value_from_row(rows[0])
+    df_instruments = bybit_instruments_to_dataframe(instruments)
+    df_tickers = bybit_tickers_to_dataframe(tickers)
 
-
-def okx_base_ccy_from_inst_id(inst_id):
-    try:
-        return str(inst_id).split("-")[0].upper()
-    except Exception:
-        return ""
-
-
-def okx_get_open_interest_history(inst_id, period=OI_HISTORY_PERIOD):
-    base_ccy = okx_base_ccy_from_inst_id(inst_id)
-
-    if not base_ccy:
-        return pd.DataFrame(columns=["timestamp", "open_interest"])
-
-    now_ms = int(pd.Timestamp.now("UTC").timestamp() * 1000)
-    begin_ms = now_ms - int(OI_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1000)
-
-    # OKX historical contract OI is exposed through the Trading Data
-    # "open-interest-volume" endpoint. r28 used a history endpoint that returned
-    # current OI but not enough usable rows for 1H/4H changes in production.
-    data = safe_get_json(
-        base_url=OKX_BASE_URL,
-        endpoint="/api/v5/rubik/stat/contracts/open-interest-volume",
-        params={
-            "ccy": base_ccy,
-            "period": period,
-            "begin": str(begin_ms),
-            "end": str(now_ms),
-        },
-        provider_name="OKX OI history",
-    )
-
-    if data.get("code") != "0":
-        raise Exception(f"OKX OI history API error: {data.get('msg')}")
-
-    return normalize_oi_history_rows(data.get("data", []))
-
-
-def okx_get_open_interest_metrics(inst_id):
-    try:
-        current_oi = okx_get_open_interest(inst_id)
-    except Exception as e:
-        print(f"OKX OI current unavailable for {inst_id}: {e}")
-        current_oi = None
-
-    try:
-        history_df = okx_get_open_interest_history(inst_id)
-    except Exception as e:
-        print(f"OKX OI history unavailable for {inst_id}: {e}")
-        history_df = pd.DataFrame(columns=["timestamp", "open_interest"])
-
-    return build_open_interest_metrics(
-        history_df=history_df,
-        current_oi=current_oi,
-        provider="OKX",
-    )
-
-
-def okx_candles_to_dataframe(raw_candles):
-    rows = raw_candles["data"]
-
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "volume_currency",
-            "quote_volume",
-            "confirm",
-        ],
-    )
-
-    numeric_columns = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "volume_currency",
-        "quote_volume",
-    ]
-
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["timestamp"] = pd.to_datetime(df["timestamp"].astype("int64"), unit="ms")
-    df["confirm"] = df["confirm"].astype(int)
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    return df
-
-
-def okx_get_last_closed_candle(df):
-    closed_df = df[df["confirm"] == 1].copy()
-
-    if closed_df.empty:
-        raise Exception("OKX: no closed candles found.")
-
-    return closed_df.iloc[-1]
-
-def okx_get_last_live_candle(df):
-    """
-    OKX returns the current candle with confirm = 0 when it is still open.
-    For live RSI we intentionally use the latest candle regardless of confirm.
-    """
-
-    if df is None or df.empty:
-        raise Exception("OKX: empty candles dataframe.")
-
-    return df.iloc[-1]
-
-def okx_closed_24h_quote_volume(df_1h):
-    closed_df = df_1h[df_1h["confirm"] == 1].copy()
-
-    if len(closed_df) < 24:
-        return None
-
-    return float(closed_df.tail(24)["quote_volume"].sum())
-
-
-def okx_volume_change_24h(df_1h):
-    closed_df = df_1h[df_1h["confirm"] == 1].copy()
-
-    if len(closed_df) < 48:
-        return None
-
-    prev_24 = closed_df.iloc[-48:-24]
-    last_24 = closed_df.iloc[-24:]
-
-    prev_volume = prev_24["quote_volume"].sum()
-    last_volume = last_24["quote_volume"].sum()
-
-    if prev_volume == 0:
-        return None
-
-    return float(((last_volume - prev_volume) / prev_volume) * 100)
-
-
-def okx_make_report_symbol(inst_id):
-    return inst_id.replace("-SWAP", "").replace("-", "") + ".P"
-
-
-def okx_build_market_universe():
-    instruments = okx_get_all_instruments()
-    df_instruments = okx_instruments_to_dataframe(instruments)
-
-    tickers = okx_get_all_tickers()
-    df_tickers = okx_tickers_to_dataframe(tickers)
-
-    df = df_instruments.merge(
-        df_tickers,
-        on="instId",
-        how="inner",
-        suffixes=("_instrument", "_ticker"),
-    )
-
-    df["price_change_24h_percent"] = (
-        (df["last"] - df["open24h"]) / df["open24h"]
-    ) * 100
-
-    if "volCcyQuote24h" in df.columns and df["volCcyQuote24h"].notna().any():
-        df["volume_usd_24h_est"] = df["volCcyQuote24h"]
-    else:
-        df["volume_usd_24h_est"] = df["volCcy24h"] * df["last"]
+    df = df_instruments[["symbol"]].merge(df_tickers, on="symbol", how="inner")
 
     df = df.dropna(
         subset=[
-            "last",
-            "open24h",
+            "price",
             "price_change_24h_percent",
             "volume_usd_24h_est",
         ]
     ).copy()
 
-    return df
+    if df.empty:
+        raise Exception("Bybit market universe is empty after merging instruments and tickers.")
+
+    return df.reset_index(drop=True)
 
 
-def okx_prefilter_candidates(df_market):
+def bybit_prefilter_candidates(df_market):
     df = df_market.copy()
 
     df = df[
@@ -4507,289 +4405,37 @@ def okx_prefilter_candidates(df_market):
     return df.head(PRE_FILTER_TOP_N)
 
 
-def okx_analyze_candidate(inst_id, ticker_row):
-    raw_1h = okx_get_candles(inst_id=inst_id, bar="1H", limit=CANDLE_LIMIT_1H)
-    df_1h = okx_candles_to_dataframe(raw_1h)
-    df_1h = calculate_rsi(df_1h, period=RSI_PERIOD)
+def bybit_candles_to_dataframe(rows):
+    """Convert Bybit kline rows into the dataframe used by the analysis.
 
-    raw_4h = okx_get_candles(inst_id=inst_id, bar="4H", limit=CANDLE_LIMIT_4H)
-    df_4h = okx_candles_to_dataframe(raw_4h)
-    df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
+    Bybit returns candles from newest to oldest as
+    [startTime ms, open, high, low, close, volume, turnover]. The dataframe is
+    sorted oldest to newest. There is no confirm flag: the last row is the live
+    candle and the previous row is the last closed candle (the analysis helpers
+    already treat dataframes without a confirm column this way).
+    """
 
-    raw_1d = okx_get_candles(inst_id=inst_id, bar="1D", limit=CANDLE_LIMIT_1D)
-    df_1d = okx_candles_to_dataframe(raw_1d)
-
-    last_1h_live = okx_get_last_live_candle(df_1h)
-    last_1h_closed = okx_get_last_closed_candle(df_1h)
-    last_4h_live = okx_get_last_live_candle(df_4h)
-
-    exact_volume_24h = okx_closed_24h_quote_volume(df_1h)
-    volume_change_24h = okx_volume_change_24h(df_1h)
-
-    rsi_1h_live = float(last_1h_live["rsi"])
-    rsi_1h_closed = float(last_1h_closed["rsi"])
-    rsi_4h_live = float(last_4h_live["rsi"])
-    price = float(last_1h_live["close"])
-    price_change_24h = float(ticker_row["price_change_24h_percent"])
-
-    oi_metrics = okx_get_open_interest_metrics(inst_id)
-
-    short_analysis = analyze_short_factors(
-        df_1h,
-        df_4h,
-        df_1d=df_1d,
-        current_price=price,
-        oi_history=oi_metrics.get("oi_history_df"),
-        provider="OKX",
-    )
-
-    classification = classify_signal(
-        rsi_1h_live=rsi_1h_live,
-        rsi_1h_closed=rsi_1h_closed,
-        rsi_4h_live=rsi_4h_live,
-        exact_volume_24h=exact_volume_24h,
-        volume_change_24h=volume_change_24h,
-        price_change_24h=price_change_24h,
-        short_setup_score=short_analysis["score"],
-        short_factors=short_analysis["factors"],
-    )
-
-    return {
-        "exchange": "OKX",
-        "provider": "OKX",
-        "raw_symbol": inst_id,
-        "symbol": okx_make_report_symbol(inst_id),
-        "price": price,
-        "rsi_1h_live": rsi_1h_live,
-        "rsi_1h_closed": rsi_1h_closed,
-        "rsi_4h_live": rsi_4h_live,
-        "volume_usd_24h_exact": exact_volume_24h,
-        "volume_change_24h_percent": volume_change_24h,
-        "price_change_24h_percent": price_change_24h,
-        "oi_current": oi_metrics.get("oi_current"),
-        "oi_change_1h_percent": oi_metrics.get("oi_change_1h_percent"),
-        "oi_change_4h_percent": oi_metrics.get("oi_change_4h_percent"),
-        "oi_context": oi_metrics.get("oi_context", "N/A"),
-        "oi_status": oi_metrics.get("oi_status", "not_available"),
-        "oi_source": oi_metrics.get("oi_source", "OKX"),
-        "oi_history_points": oi_metrics.get("oi_history_points", 0),
-        "oi_history_latest_ts": oi_metrics.get("oi_history_latest_ts"),
-        "signal_level": classification["signal_level"],
-        "reason": classification["reason"],
-        "pump_score": classification["pump_score"],
-        "rsi_score": classification["rsi_score"],
-        "volume_score": classification["volume_score"],
-        "short_setup_score": classification["short_setup_score"],
-        "final_score": classification["final_score"],
-        "location_score": classification.get("location_score", 0),
-        "trigger_count": classification.get("trigger_count", 0),
-        "setup_status": classification.get("setup_status", "N/A"),
-        "short_factors": short_analysis["factors"],
-        "confirmed_short_factors_count": short_analysis["confirmed_count"],
-        "total_short_factors_count": short_analysis["total_count"],
-    }
-
-def run_okx_screener():
-    print("\n" + "=" * 120)
-    print("RUNNING OKX PROVIDER")
-    print("=" * 120)
-
-    df_market = okx_build_market_universe()
-    total_universe_count = len(df_market)
-
-    df_candidates = okx_prefilter_candidates(df_market)
-    prefiltered_count = len(df_candidates)
-
-    print("OKX total universe:", total_universe_count)
-    print("OKX prefiltered:", prefiltered_count)
-
-    results = []
-
-    for index, row in df_candidates.iterrows():
-        inst_id = row["instId"]
-
-        try:
-            result = okx_analyze_candidate(inst_id, row)
-            results.append(result)
-
-        except Exception as e:
-            print(f"OKX error while analyzing {inst_id}: {e}")
-
-        time.sleep(REQUEST_DELAY_SECONDS)
-
-    df_results = pd.DataFrame(results)
-
-    if df_results.empty:
-        return df_results, total_universe_count, prefiltered_count, 0
-
-    df_results["signal_rank"] = df_results["signal_level"].apply(get_signal_rank)
-
-    active_count = len(df_results[df_results["signal_level"] != "NO_SIGNAL"])
-
-    return df_results, total_universe_count, prefiltered_count, active_count
-
-
-# ============================================================
-# BITGET PROVIDER
-# ============================================================
-
-def bitget_success(data):
-    return str(data.get("code")) == "00000"
-
-
-def bitget_get_contracts():
-    data = safe_get_json(
-        base_url=BITGET_BASE_URL,
-        endpoint="/api/v2/mix/market/contracts",
-        params={"productType": BITGET_PRODUCT_TYPE},
-        provider_name="Bitget",
-    )
-
-    if not bitget_success(data):
-        raise Exception(f"Bitget API error: {data.get('msg')}")
-
-    return data["data"]
-
-
-def bitget_get_tickers():
-    data = safe_get_json(
-        base_url=BITGET_BASE_URL,
-        endpoint="/api/v2/mix/market/tickers",
-        params={"productType": BITGET_PRODUCT_TYPE},
-        provider_name="Bitget",
-    )
-
-    if not bitget_success(data):
-        raise Exception(f"Bitget API error: {data.get('msg')}")
-
-    return data["data"]
-
-
-def bitget_get_candles(symbol, granularity, limit):
-    data = safe_get_json(
-        base_url=BITGET_BASE_URL,
-        endpoint="/api/v2/mix/market/candles",
-        params={
-            "productType": BITGET_PRODUCT_TYPE,
-            "symbol": symbol,
-            "granularity": granularity,
-            "limit": str(limit),
-        },
-        provider_name="Bitget",
-    )
-
-    if not bitget_success(data):
-        raise Exception(f"Bitget API error: {data.get('msg')}")
-
-    return data["data"]
-
-
-def bitget_contracts_to_dataframe(contracts):
-    df = pd.DataFrame(contracts)
-
-    if df.empty:
-        return df
-
-    if "symbol" not in df.columns:
-        raise Exception("Bitget contracts response has no symbol column.")
-
-    df["symbol"] = df["symbol"].astype(str)
-
-    return df.reset_index(drop=True)
-
-
-def bitget_normalize_change(value):
-    if value is None or pd.isna(value):
-        return np.nan
-
-    value = float(value)
-
-    # Bitget can return change as ratio, e.g. 0.12 = 12%.
-    if abs(value) <= 2:
-        return value * 100
-
-    return value
-
-
-def bitget_tickers_to_dataframe(tickers):
-    df = pd.DataFrame(tickers)
-
-    if df.empty:
-        return df
-
-    if "symbol" not in df.columns:
-        raise Exception("Bitget tickers response has no symbol column.")
-
-    numeric_cols = [
-        "lastPr",
-        "last",
-        "open24h",
-        "high24h",
-        "low24h",
-        "change24h",
-        "priceChangePercent",
-        "baseVolume",
-        "quoteVolume",
-        "usdtVolume",
-    ]
-
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "lastPr" in df.columns:
-        df["price"] = df["lastPr"]
-    elif "last" in df.columns:
-        df["price"] = df["last"]
-    else:
-        raise Exception("Bitget: no price column found.")
-
-    if "change24h" in df.columns:
-        df["price_change_24h_percent"] = df["change24h"].apply(bitget_normalize_change)
-    elif "priceChangePercent" in df.columns:
-        df["price_change_24h_percent"] = df["priceChangePercent"].apply(bitget_normalize_change)
-    elif "open24h" in df.columns:
-        df["price_change_24h_percent"] = ((df["price"] - df["open24h"]) / df["open24h"]) * 100
-    else:
-        df["price_change_24h_percent"] = np.nan
-
-    if "usdtVolume" in df.columns:
-        df["volume_usd_24h_est"] = df["usdtVolume"]
-    elif "quoteVolume" in df.columns:
-        df["volume_usd_24h_est"] = df["quoteVolume"]
-    elif "baseVolume" in df.columns:
-        df["volume_usd_24h_est"] = df["baseVolume"] * df["price"]
-    else:
-        df["volume_usd_24h_est"] = np.nan
-
-    return df
-
-
-def bitget_candles_to_dataframe(rows):
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
 
-    if df.shape[1] < 6:
-        raise Exception(f"Bitget: unexpected candle format. Columns: {df.shape[1]}")
+    if df.shape[1] < 7:
+        raise Exception(f"Bybit: unexpected candle format. Columns: {df.shape[1]}")
 
-    columns = [
+    df = df.iloc[:, :7].copy()
+    df.columns = [
         "timestamp",
         "open",
         "high",
         "low",
         "close",
-        "base_volume",
+        "volume",
         "quote_volume",
     ]
 
-    df = df.iloc[:, : min(df.shape[1], len(columns))]
-    df.columns = columns[: df.shape[1]]
-
-    for col in ["open", "high", "low", "close", "base_volume", "quote_volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["open", "high", "low", "close", "volume", "quote_volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
 
     df["timestamp"] = pd.to_datetime(df["timestamp"].astype("int64"), unit="ms")
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -4797,29 +4443,26 @@ def bitget_candles_to_dataframe(rows):
     return df
 
 
-def bitget_get_last_closed_candle(df):
-    # Bitget does not provide OKX-style confirm field.
-    # Use previous candle as safer closed candle.
+def bybit_get_last_closed_candle(df):
+    # Bybit has no confirm field: the previous candle is the last closed one.
     if df is None or df.empty:
-        raise Exception("Bitget: empty candles dataframe.")
+        raise Exception("Bybit: empty candles dataframe.")
 
     if len(df) >= 2:
         return df.iloc[-2]
 
     return df.iloc[-1]
 
-def bitget_get_last_live_candle(df):
-    """
-    Bitget does not provide a confirm field.
-    For live RSI we use the latest candle row.
-    """
 
+def bybit_get_last_live_candle(df):
+    # Bybit has no confirm field: the latest row is the live candle.
     if df is None or df.empty:
-        raise Exception("Bitget: empty candles dataframe.")
+        raise Exception("Bybit: empty candles dataframe.")
 
     return df.iloc[-1]
 
-def bitget_closed_24h_quote_volume(df_1h):
+
+def bybit_closed_24h_quote_volume(df_1h):
     if df_1h is None or df_1h.empty or "quote_volume" not in df_1h.columns:
         return None
 
@@ -4831,7 +4474,7 @@ def bitget_closed_24h_quote_volume(df_1h):
     return float(closed_df.tail(24)["quote_volume"].sum())
 
 
-def bitget_volume_change_24h(df_1h):
+def bybit_volume_change_24h(df_1h):
     if df_1h is None or df_1h.empty or "quote_volume" not in df_1h.columns:
         return None
 
@@ -4849,143 +4492,60 @@ def bitget_volume_change_24h(df_1h):
     return float(((last_24 - prev_24) / prev_24) * 100)
 
 
-def bitget_get_open_interest(symbol):
-    data = safe_get_json(
-        base_url=BITGET_BASE_URL,
-        endpoint="/api/v2/mix/market/open-interest",
-        params={
+def bybit_get_open_interest_history(symbol):
+    data = bybit_get(
+        "/v5/market/open-interest",
+        {
+            "category": BYBIT_CATEGORY,
             "symbol": symbol,
-            "productType": BITGET_PRODUCT_TYPE,
+            "intervalTime": BYBIT_OI_INTERVAL,
+            "limit": BYBIT_OI_HISTORY_LIMIT,
         },
-        provider_name="Bitget OI",
+        label="Bybit OI",
     )
 
-    if not bitget_success(data):
-        raise Exception(f"Bitget OI API error: {data.get('msg')}")
-
-    payload = data.get("data")
-
-    if isinstance(payload, list) and payload:
-        return extract_oi_value_from_row(payload[0])
-
-    if isinstance(payload, dict):
-        return extract_oi_value_from_row(payload)
-
-    return None
+    # Rows are newest first: {"openInterest": "...", "timestamp": "ms"}.
+    # normalize_oi_history_rows sorts them oldest to newest.
+    return normalize_oi_history_rows(bybit_result_list(data))
 
 
-def bitget_symbol_to_okx_inst_id(symbol):
-    text = str(symbol or "").upper().strip()
-
-    if text.endswith("USDT"):
-        base = text[:-4]
-        return f"{base}-USDT-SWAP"
-
-    return ""
-
-
-def bitget_get_open_interest_metrics(symbol, allow_okx_fallback=False):
-    # Bitget public Futures API exposes current OI, but not enough historical
-    # OI for 1H/4H changes. r36 can optionally try OKX historical OI as a
-    # fallback for the same TradingView symbol when the candidate is already
-    # hot enough for OI divergence to matter.
+def bybit_get_open_interest_metrics(symbol):
     try:
-        current_oi = bitget_get_open_interest(symbol)
+        history_df = bybit_get_open_interest_history(symbol)
     except Exception as e:
-        print(f"Bitget OI current unavailable for {symbol}: {e}")
-        current_oi = None
+        print(f"Bybit OI unavailable for {symbol}: {redact_proxy_details(e)}")
+        history_df = pd.DataFrame(columns=["timestamp", "open_interest"])
 
-    bitget_metrics = build_open_interest_metrics(
-        history_df=pd.DataFrame(columns=["timestamp", "open_interest"]),
+    current_oi = None
+
+    if not history_df.empty:
+        current_oi = float(history_df.iloc[-1]["open_interest"])
+
+    return build_open_interest_metrics(
+        history_df=history_df,
         current_oi=current_oi,
-        provider="Bitget_current",
+        provider="Bybit",
     )
 
-    if allow_okx_fallback:
-        okx_inst_id = bitget_symbol_to_okx_inst_id(symbol)
 
-        if okx_inst_id:
-            try:
-                fallback_metrics = okx_get_open_interest_metrics(okx_inst_id)
-
-                if str(fallback_metrics.get("oi_status")) == "ok" and int(fallback_metrics.get("oi_history_points", 0) or 0) > 0:
-                    fallback_metrics["oi_source"] = "OKX_fallback"
-                    fallback_metrics["oi_fallback_symbol"] = okx_inst_id
-                    fallback_metrics["oi_fallback_for_exchange"] = "Bitget"
-                    return fallback_metrics
-
-                print(
-                    "Bitget OI OKX fallback unavailable",
-                    f"symbol={symbol}",
-                    f"okx_inst_id={okx_inst_id}",
-                    f"status={fallback_metrics.get('oi_status')}",
-                    f"history_points={fallback_metrics.get('oi_history_points')}",
-                )
-            except Exception as e:
-                print(f"Bitget OI OKX fallback failed for {symbol} ({okx_inst_id}): {e}")
-
-    return bitget_metrics
-
-
-def bitget_build_market_universe():
-    contracts = bitget_get_contracts()
-    tickers = bitget_get_tickers()
-
-    df_contracts = bitget_contracts_to_dataframe(contracts)
-    df_tickers = bitget_tickers_to_dataframe(tickers)
-
-    df = df_contracts.merge(
-        df_tickers,
-        on="symbol",
-        how="inner",
-        suffixes=("_contract", "_ticker"),
-    )
-
-    df = df.dropna(
-        subset=[
-            "price",
-            "price_change_24h_percent",
-            "volume_usd_24h_est",
-        ]
-    ).copy()
-
-    return df
-
-
-def bitget_prefilter_candidates(df_market):
-    df = df_market.copy()
-
-    df = df[
-        (df["price_change_24h_percent"] >= MIN_PRICE_CHANGE_24H)
-        & (df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H)
-    ].copy()
-
-    df = df.sort_values(
-        by=["price_change_24h_percent", "volume_usd_24h_est"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
-
-    return df.head(PRE_FILTER_TOP_N)
-
-
-def bitget_analyze_candidate(symbol, ticker_row):
-    raw_1h = bitget_get_candles(symbol=symbol, granularity="1H", limit=CANDLE_LIMIT_1H)
-    df_1h = bitget_candles_to_dataframe(raw_1h)
+def bybit_analyze_candidate(symbol, ticker_row):
+    raw_1h = bybit_get_candles(symbol=symbol, interval=BYBIT_INTERVALS["1H"], limit=CANDLE_LIMIT_1H)
+    df_1h = bybit_candles_to_dataframe(raw_1h)
     df_1h = calculate_rsi(df_1h, period=RSI_PERIOD)
 
-    raw_4h = bitget_get_candles(symbol=symbol, granularity="4H", limit=CANDLE_LIMIT_4H)
-    df_4h = bitget_candles_to_dataframe(raw_4h)
+    raw_4h = bybit_get_candles(symbol=symbol, interval=BYBIT_INTERVALS["4H"], limit=CANDLE_LIMIT_4H)
+    df_4h = bybit_candles_to_dataframe(raw_4h)
     df_4h = calculate_rsi(df_4h, period=RSI_PERIOD)
 
-    raw_1d = bitget_get_candles(symbol=symbol, granularity="1D", limit=CANDLE_LIMIT_1D)
-    df_1d = bitget_candles_to_dataframe(raw_1d)
+    raw_1d = bybit_get_candles(symbol=symbol, interval=BYBIT_INTERVALS["1D"], limit=CANDLE_LIMIT_1D)
+    df_1d = bybit_candles_to_dataframe(raw_1d)
 
-    last_1h_live = bitget_get_last_live_candle(df_1h)
-    last_1h_closed = bitget_get_last_closed_candle(df_1h)
-    last_4h_live = bitget_get_last_live_candle(df_4h)
+    last_1h_live = bybit_get_last_live_candle(df_1h)
+    last_1h_closed = bybit_get_last_closed_candle(df_1h)
+    last_4h_live = bybit_get_last_live_candle(df_4h)
 
-    exact_volume_24h = bitget_closed_24h_quote_volume(df_1h)
-    volume_change_24h = bitget_volume_change_24h(df_1h)
+    exact_volume_24h = bybit_closed_24h_quote_volume(df_1h)
+    volume_change_24h = bybit_volume_change_24h(df_1h)
 
     rsi_1h_live = float(last_1h_live["rsi"])
     rsi_1h_closed = float(last_1h_closed["rsi"])
@@ -4993,19 +4553,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
     price = float(last_1h_live["close"])
     price_change_24h = float(ticker_row["price_change_24h_percent"])
 
-    potential_overheat = detect_overheat_watch_context(
-        rsi_1h_live=rsi_1h_live,
-        rsi_1h_closed=rsi_1h_closed,
-        rsi_4h_live=rsi_4h_live,
-        exact_volume_24h=exact_volume_24h,
-        price_change_24h=price_change_24h,
-    )
-
-    oi_metrics = bitget_get_open_interest_metrics(
-        symbol,
-        allow_okx_fallback=bool(potential_overheat.get("is_overheat", False)),
-    )
-    oi_provider_for_divergence = str(oi_metrics.get("oi_source") or "Bitget")
+    oi_metrics = bybit_get_open_interest_metrics(symbol)
 
     short_analysis = analyze_short_factors(
         df_1h,
@@ -5013,7 +4561,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
         df_1d=df_1d,
         current_price=price,
         oi_history=oi_metrics.get("oi_history_df"),
-        provider=oi_provider_for_divergence,
+        provider="Bybit",
     )
 
     classification = classify_signal(
@@ -5028,8 +4576,8 @@ def bitget_analyze_candidate(symbol, ticker_row):
     )
 
     return {
-        "exchange": "Bitget",
-        "provider": "Bitget",
+        "exchange": "Bybit",
+        "provider": "Bybit",
         "raw_symbol": symbol,
         "symbol": f"{symbol}.P",
         "price": price,
@@ -5044,7 +4592,7 @@ def bitget_analyze_candidate(symbol, ticker_row):
         "oi_change_4h_percent": oi_metrics.get("oi_change_4h_percent"),
         "oi_context": oi_metrics.get("oi_context", "N/A"),
         "oi_status": oi_metrics.get("oi_status", "not_available"),
-        "oi_source": oi_metrics.get("oi_source", "Bitget"),
+        "oi_source": oi_metrics.get("oi_source", "Bybit"),
         "oi_history_points": oi_metrics.get("oi_history_points", 0),
         "oi_history_latest_ts": oi_metrics.get("oi_history_latest_ts"),
         "signal_level": classification["signal_level"],
@@ -5062,44 +4610,62 @@ def bitget_analyze_candidate(symbol, ticker_row):
         "total_short_factors_count": short_analysis["total_count"],
     }
 
-def run_bitget_screener():
+
+def run_bybit_screener():
+    """Fetch the Bybit universe and analyze every prefiltered candidate.
+
+    Returns (df_results, stats). A failure to get the instruments or tickers
+    raises an exception; a failure on a single symbol is counted in
+    stats["errors"] so the report can warn about incomplete data.
+    """
+
     print("\n" + "=" * 120)
-    print("RUNNING BITGET PROVIDER")
+    print("RUNNING BYBIT PROVIDER")
     print("=" * 120)
 
-    df_market = bitget_build_market_universe()
+    df_market = bybit_build_market_universe()
     total_universe_count = len(df_market)
 
-    df_candidates = bitget_prefilter_candidates(df_market)
+    df_candidates = bybit_prefilter_candidates(df_market)
     prefiltered_count = len(df_candidates)
 
-    print("Bitget total universe:", total_universe_count)
-    print("Bitget prefiltered:", prefiltered_count)
+    print("Bybit total universe:", total_universe_count)
+    print("Bybit prefiltered:", prefiltered_count)
 
     results = []
+    error_count = 0
 
     for index, row in df_candidates.iterrows():
         symbol = row["symbol"]
 
         try:
-            result = bitget_analyze_candidate(symbol, row)
+            result = bybit_analyze_candidate(symbol, row)
             results.append(result)
 
         except Exception as e:
-            print(f"Bitget error while analyzing {symbol}: {e}")
+            error_count += 1
+            print(f"Bybit error while analyzing {symbol}: {redact_proxy_details(e)}")
 
         time.sleep(REQUEST_DELAY_SECONDS)
 
     df_results = pd.DataFrame(results)
 
+    stats = {
+        "total_universe": total_universe_count,
+        "prefiltered": prefiltered_count,
+        "analyzed": len(results),
+        "errors": error_count,
+        "active": 0,
+    }
+
     if df_results.empty:
-        return df_results, total_universe_count, prefiltered_count, 0
+        return df_results, stats
 
     df_results["signal_rank"] = df_results["signal_level"].apply(get_signal_rank)
 
-    active_count = len(df_results[df_results["signal_level"] != "NO_SIGNAL"])
+    stats["active"] = len(df_results[df_results["signal_level"] != "NO_SIGNAL"])
 
-    return df_results, total_universe_count, prefiltered_count, active_count
+    return df_results, stats
 
 
 # ============================================================
@@ -5274,21 +4840,11 @@ def prepare_active_output_table(df_active):
 
     return df_out[columns]
 
-def exchange_sort_key(exchange):
-    order = {
-        "OKX": 1,
-        "Bitget": 2,
-    }
-
-    return order.get(str(exchange), 99)
-
-
 def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
     """
     Group active signals by symbol.
 
-    If the same symbol exists on OKX and Bitget, Telegram shows it once.
-    Display values are taken from OKX when available; otherwise from the first available exchange.
+    Bybit is the only data source, so each symbol appears once.
     Ranking uses live RSI fields, not closed 4H RSI.
     """
 
@@ -5319,21 +4875,9 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
 
         top_row = group_sorted.iloc[0]
 
-        exchanges = sorted(
-            group_sorted["exchange"].dropna().astype(str).unique().tolist(),
-            key=exchange_sort_key,
-        )
-
         details = []
 
-        group_by_exchange = group_sorted.copy()
-        group_by_exchange["exchange_order"] = group_by_exchange["exchange"].apply(exchange_sort_key)
-        group_by_exchange = group_by_exchange.sort_values(
-            by=["exchange_order", "signal_rank"],
-            ascending=[True, False],
-        )
-
-        for _, row in group_by_exchange.iterrows():
+        for _, row in group_sorted.iterrows():
             details.append({
                 "exchange": str(row["exchange"]),
                 "signal_level": str(row["signal_level"]),
@@ -5388,9 +4932,6 @@ def prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N):
             "signal_rank": int(display_signal_rank),
             "reason": str(display_detail.get("reason", top_row["reason"])),
             "reasons": unique_reasons,
-            "exchanges": exchanges,
-            "exchanges_text": " + ".join(exchanges),
-            "best_exchange": str(top_row["exchange"]),
             "best_rsi_1h_live": float(group_sorted["rsi_1h_live"].max()),
             "best_rsi_1h_closed": float(group_sorted["rsi_1h_closed"].max()),
             "best_rsi_4h_live": float(group_sorted["rsi_4h_live"].max()),
@@ -5430,8 +4971,6 @@ def prepare_grouped_output_table(grouped_signals):
         rows.append({
             "signal_level": item["signal_level"],
             "symbol": item["symbol"],
-            "exchanges": item["exchanges_text"],
-            "best_exchange": item["best_exchange"],
             "best_rsi_1h_live": round(item["best_rsi_1h_live"], 2),
             "best_rsi_1h_closed": round(item["best_rsi_1h_closed"], 2),
             "best_rsi_4h_live": round(item["best_rsi_4h_live"], 2),
@@ -5908,15 +5447,7 @@ def log_rejection_debug_for_grouped_signals(grouped_signals):
         print(" ".join(fields))
 
 
-def format_multi_provider_telegram(
-    grouped_signals,
-    okx_total,
-    okx_prefiltered,
-    okx_active,
-    bitget_total,
-    bitget_prefiltered,
-    bitget_active,
-):
+def format_telegram_report(grouped_signals, data_warning=None):
     """
     Compact user-facing Telegram report.
 
@@ -5945,6 +5476,9 @@ def format_multi_provider_telegram(
     lines = []
     lines.append("📊 <b>Market Heat Scanner</b>")
     lines.append(f"{html.escape(now_kyiv)} | {html.escape(SCRIPT_VERSION)}")
+
+    if data_warning:
+        lines.append(html.escape(str(data_warning)))
 
     if total_visible_count > displayed_count:
         lines.append(f"Shown: <b>{displayed_count}</b>/<b>{total_visible_count}</b>")
@@ -6007,30 +5541,80 @@ def format_multi_provider_telegram(
     return "\n".join(lines)
 
 # ============================================================
-# MULTI PROVIDER RUNNER
+# DATA QUALITY (incomplete data must never look like a calm market)
 # ============================================================
 
-def run_multi_provider_screener():
+def classify_data_quality(candidates_total, errors):
+    """Return "ok", "partial" or "incomplete".
+
+    - ok: no candidate failed;
+    - partial: some candidates failed, but not more than half;
+    - incomplete: more than half of the candidates failed.
+    """
+
+    total = int(candidates_total or 0)
+    failed = int(errors or 0)
+
+    if failed <= 0 or total <= 0:
+        return "ok"
+
+    if failed / total > DATA_ERROR_MAX_SHARE:
+        return "incomplete"
+
+    return "partial"
+
+
+def format_data_warning_line(analyzed, candidates_total, errors):
+    return f"⚠️ Проаналізовано {int(analyzed)} з {int(candidates_total)} кандидатів, {int(errors)} помилок"
+
+
+def format_incomplete_data_message(analyzed, candidates_total, errors):
+    return (
+        f"⚠️ Дані неповні: проаналізовано {int(analyzed)} з {int(candidates_total)} кандидатів, "
+        f"{int(errors)} помилок. Звіт не сформовано."
+    )
+
+
+def format_market_data_error_message():
+    return "⚠️ Не вдалося отримати список монет або тікери з Bybit. Звіт не сформовано."
+
+
+# ============================================================
+# SCREENER RUNNER
+# ============================================================
+
+def run_screener():
     print("\n" + "=" * 120)
-    print("RUNNING MULTI-PROVIDER SCREENER")
+    print("RUNNING BYBIT SCREENER")
     print("SCRIPT VERSION:", SCRIPT_VERSION)
     print("=" * 120)
 
-    okx_results, okx_total, okx_prefiltered, okx_active = run_okx_screener()
-    bitget_results, bitget_total, bitget_prefiltered, bitget_active = run_bitget_screener()
+    try:
+        df_all, stats = run_bybit_screener()
+    except Exception as e:
+        print(f"Bybit market data unavailable: {redact_proxy_details(e)}")
+        send_telegram_message_safe(format_market_data_error_message())
+        sys.exit(1)
 
-    frames = []
+    candidates_total = stats["analyzed"] + stats["errors"]
+    data_quality = classify_data_quality(candidates_total, stats["errors"])
 
-    if okx_results is not None and not okx_results.empty:
-        frames.append(okx_results)
+    if data_quality == "incomplete":
+        print(
+            "Bybit data is incomplete:",
+            f"analyzed={stats['analyzed']}",
+            f"candidates={candidates_total}",
+            f"errors={stats['errors']}",
+        )
+        send_telegram_message_safe(
+            format_incomplete_data_message(stats["analyzed"], candidates_total, stats["errors"])
+        )
+        sys.exit(1)
 
-    if bitget_results is not None and not bitget_results.empty:
-        frames.append(bitget_results)
+    data_warning = None
 
-    if not frames:
-        df_all = pd.DataFrame()
-    else:
-        df_all = pd.concat(frames, ignore_index=True)
+    if data_quality == "partial":
+        data_warning = format_data_warning_line(stats["analyzed"], candidates_total, stats["errors"])
 
     if df_all.empty:
         df_active = pd.DataFrame()
@@ -6059,14 +5643,13 @@ def run_multi_provider_screener():
         df_active = df_active_before_rsi_filter[df_active_before_rsi_filter["rsi_entry_passed"]].copy()
 
     print("\n" + "=" * 120)
-    print("MULTI-PROVIDER SUMMARY")
+    print("SUMMARY")
     print("=" * 120)
-    print("OKX total universe:", okx_total)
-    print("OKX prefiltered:", okx_prefiltered)
-    print("OKX active:", okx_active)
-    print("Bitget total universe:", bitget_total)
-    print("Bitget prefiltered:", bitget_prefiltered)
-    print("Bitget active:", bitget_active)
+    print("Bybit total universe:", stats["total_universe"])
+    print("Bybit prefiltered:", stats["prefiltered"])
+    print("Bybit analyzed:", stats["analyzed"])
+    print("Bybit errors:", stats["errors"])
+    print("Bybit active:", stats["active"])
     print("RSI entry filtered out:", rsi_filtered_out_count)
     print("Total active signals after RSI entry filter:", len(df_active))
 
@@ -6083,7 +5666,7 @@ def run_multi_provider_screener():
         print("No active signals.")
     else:
         print("\n" + "=" * 120)
-        print("ACTIVE SIGNALS BY EXCHANGE")
+        print("ACTIVE SIGNALS")
         print("=" * 120)
         print(df_active_output.head(FINAL_TOP_N).to_string(index=False))
 
@@ -6093,17 +5676,13 @@ def run_multi_provider_screener():
         print(df_grouped_output.head(FINAL_TOP_N).to_string(index=False))
 
     if SEND_MESSAGE_IF_NO_SIGNALS or grouped_signals:
-        message = format_multi_provider_telegram(
+        message = format_telegram_report(
             grouped_signals=grouped_signals,
-            okx_total=okx_total,
-            okx_prefiltered=okx_prefiltered,
-            okx_active=okx_active,
-            bitget_total=bitget_total,
-            bitget_prefiltered=bitget_prefiltered,
-            bitget_active=bitget_active,
+            data_warning=data_warning,
         )
 
         send_telegram_message_safe(message)
+
 
 
 # ============================================================
@@ -7229,24 +6808,38 @@ def run_open_interest_self_tests():
         }) == "OI: Long build-up (+8.4% 1H / +21.7% 4H)",
     ))
     tests.append((
-        "format_current_only_line",
+        "format_current_only_line_is_hidden",
         format_oi_line_for_telegram({
             "oi_current": 3293570,
             "oi_change_1h_percent": None,
             "oi_change_4h_percent": None,
             "oi_context": "N/A",
-            "oi_source": "Bitget",
-        }) == "OI: unavailable — Bitget history not supported",
+            "oi_source": "Bybit",
+        }) == "",
     ))
-    bitget_sample = {
-        "openInterestList": [
-            {"symbol": "BTCUSDT", "size": "34278.06"},
-        ],
-        "ts": "1695796781616",
-    }
     tests.append((
-        "bitget_nested_current_oi",
-        abs(extract_oi_value_from_row(bitget_sample) - 34278.06) < 0.0001,
+        "format_unwind_line",
+        format_oi_line_for_telegram({
+            "oi_change_1h_percent": -6.0,
+            "oi_change_4h_percent": -9.5,
+            "oi_context": "Short squeeze / OI unwind",
+            "oi_source": "Bybit",
+        }) == "OI: OI unwind (-6.0% 1H / -9.5% 4H)",
+    ))
+    bybit_oi_rows = [
+        {"openInterest": "130.5", "timestamp": "1781532000000"},
+        {"openInterest": "120.0", "timestamp": "1781528400000"},
+        {"openInterest": "100.0", "timestamp": "1781524800000"},
+    ]
+    bybit_oi_history = normalize_oi_history_rows(bybit_oi_rows)
+    tests.append((
+        "bybit_oi_history_sorted_oldest_first",
+        list(bybit_oi_history["open_interest"]) == [100.0, 120.0, 130.5]
+        and bool(bybit_oi_history["timestamp"].is_monotonic_increasing),
+    ))
+    tests.append((
+        "bybit_oi_history_timestamp_ms",
+        str(bybit_oi_history["timestamp"].iloc[-1]) == str(pd.to_datetime(1781532000000, unit="ms")),
     ))
 
     history = pd.DataFrame([
@@ -7381,12 +6974,26 @@ def run_oi_divergence_self_tests():
             lambda: detect_oi_bearish_divergence_for_timeframe(price_df, confirming_oi, timeframe="1H").get("status") in ("not_confirmed", "weak"),
         ),
         (
-            "combined OI divergence factor confirms OKX history",
-            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="OKX").get("status") == "confirmed",
+            "combined OI divergence factor confirms Bybit history",
+            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="Bybit").get("status") == "confirmed",
         ),
         (
-            "Bitget OI divergence unavailable due history restriction",
-            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="Bitget").get("status") == "not_available",
+            "OI divergence is available for Bybit (no provider restriction)",
+            lambda: detect_oi_bearish_divergence(df_1h=price_df, df_4h=price_df, oi_history=bearish_oi, provider="Bybit").get("status") != "not_available",
+        ),
+        (
+            "Bybit-style raw OI rows (newest first) give a confirmed divergence",
+            lambda: detect_oi_bearish_divergence(
+                df_1h=price_df,
+                df_4h=price_df,
+                oi_history=normalize_oi_history_rows(
+                    [
+                        {"openInterest": str(row["open_interest"]), "timestamp": str(int(row["timestamp"].timestamp() * 1000))}
+                        for _, row in bearish_oi.sort_values("timestamp", ascending=False).iterrows()
+                    ]
+                ),
+                provider="Bybit",
+            ).get("status") == "confirmed",
         ),
     ]
 
@@ -7408,6 +7015,297 @@ def run_oi_divergence_self_tests():
     print(f"OI DIVERGENCE SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
+def run_bybit_self_tests():
+    print("RUNNING BYBIT SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+
+    import contextlib
+    import io
+
+    @contextlib.contextmanager
+    def patched(**replacements):
+        saved = {name: globals()[name] for name in replacements}
+        globals().update(replacements)
+        try:
+            yield
+        finally:
+            globals().update(saved)
+
+    @contextlib.contextmanager
+    def proxy_env(url="https://proxy.example.com/", secret="test-secret-value"):
+        names = ["BYBIT_PROXY_URL", "BYBIT_PROXY_SECRET"]
+        saved = {name: os.environ.get(name) for name in names}
+        for name, value in zip(names, [url, secret]):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    class FakeResponse:
+        def __init__(self, payload, status_code=200):
+            self.payload = payload
+            self.status_code = status_code
+            self.text = str(payload)
+
+        def json(self):
+            return self.payload
+
+    class FakeSession:
+        def __init__(self, payload, status_code=200):
+            self.payload = payload
+            self.status_code = status_code
+            self.calls = []
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            self.calls.append({"url": url, "params": params, "headers": headers})
+            return FakeResponse(self.payload, self.status_code)
+
+    def quiet(func, *args, **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return func(*args, **kwargs)
+
+    def raises(func, *args, **kwargs):
+        try:
+            quiet(func, *args, **kwargs)
+        except BaseException as exc:
+            return exc
+        return None
+
+    # Bybit kline rows: newest first, strings, [start ms, o, h, l, c, volume, turnover].
+    kline_rows = [
+        ["1781532000000", "10.5", "11.0", "10.0", "10.8", "100", "1080"],
+        ["1781528400000", "10.0", "10.6", "9.9", "10.5", "90", "950"],
+        ["1781524800000", "9.8", "10.1", "9.7", "10.0", "80", "790"],
+    ]
+    df_k = bybit_candles_to_dataframe(kline_rows)
+
+    # Synthetic API payloads for the full candidate pipeline.
+    def to_bybit_rows(df):
+        rows = []
+        for _, r in df.iloc[::-1].iterrows():
+            rows.append([
+                str(int(r["timestamp"].timestamp() * 1000)),
+                str(r["open"]), str(r["high"]), str(r["low"]), str(r["close"]),
+                str(r["volume"]), str(r["quote_volume"]),
+            ])
+        return rows
+
+    rng = np.random.default_rng(7)
+    n = 400
+    closes = 100 * np.exp(np.cumsum(rng.normal(0.0, 0.004, size=n)))
+    closes[-30:] *= np.linspace(1.0, 1.25, 30)
+    base_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="1h"),
+        "open": np.concatenate([[100.0], closes[:-1]]),
+        "high": closes * 1.004,
+        "low": closes * 0.996,
+        "close": closes,
+        "volume": 1000.0,
+        "quote_volume": 1000.0 * closes,
+    })
+    market_1h = base_df
+    market_4h = base_df.iloc[::4].reset_index(drop=True)
+    market_1d = base_df.iloc[::24].reset_index(drop=True)
+    market_oi = [
+        {"openInterest": str(5000 + i), "timestamp": str(int(ts.timestamp() * 1000))}
+        for i, ts in list(enumerate(base_df["timestamp"].tail(200)))[::-1]
+    ]
+
+    def fake_candles(symbol, interval, limit):
+        source = {"60": market_1h, "240": market_4h, "D": market_1d}[interval]
+        return to_bybit_rows(source)
+
+    def fake_oi_history(symbol):
+        return normalize_oi_history_rows(market_oi)
+
+    ticker_row = pd.Series({"symbol": "TESTUSDT", "price_change_24h_percent": 25.0})
+
+    with patched(bybit_get_candles=fake_candles, bybit_get_open_interest_history=fake_oi_history):
+        candidate = quiet(bybit_analyze_candidate, "TESTUSDT", ticker_row)
+
+    instruments = [
+        {"symbol": "AAAUSDT", "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Trading"},
+        {"symbol": "BBBUSDT", "contractType": "LinearFutures", "quoteCoin": "USDT", "status": "Trading"},
+        {"symbol": "CCCUSDC", "contractType": "LinearPerpetual", "quoteCoin": "USDC", "status": "Trading"},
+        {"symbol": "DDDUSDT", "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Closed"},
+        {"symbol": "EEEUSDT", "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Trading"},
+    ]
+    tickers = [
+        {"symbol": "AAAUSDT", "lastPrice": "2.5", "price24hPcnt": "0.1273", "turnover24h": "74340000"},
+        {"symbol": "EEEUSDT", "lastPrice": "1.0", "price24hPcnt": "0.05", "turnover24h": "90000000"},
+        {"symbol": "BBBUSDT", "lastPrice": "1.0", "price24hPcnt": "0.50", "turnover24h": "90000000"},
+    ]
+    df_inst = bybit_instruments_to_dataframe(instruments)
+    df_tick = bybit_tickers_to_dataframe(tickers)
+
+    with patched(bybit_get_instruments=lambda: instruments, bybit_get_tickers=lambda: tickers):
+        df_universe = bybit_build_market_universe()
+        df_pre = bybit_prefilter_candidates(df_universe)
+
+    # Data quality / error accounting.
+    def run_with_errors(failing_symbols):
+        candidates = pd.DataFrame({
+            "symbol": [f"S{i}USDT" for i in range(10)],
+            "price": 1.0,
+            "price_change_24h_percent": 20.0,
+            "volume_usd_24h_est": 10_000_000.0,
+        })
+
+        def fake_analyze(symbol, row):
+            if symbol in failing_symbols:
+                raise Exception("boom")
+            return {"signal_level": "NO_SIGNAL", "symbol": symbol}
+
+        with patched(
+            bybit_build_market_universe=lambda: candidates,
+            bybit_prefilter_candidates=lambda df: df,
+            bybit_analyze_candidate=fake_analyze,
+            REQUEST_DELAY_SECONDS=0,
+        ):
+            return quiet(run_bybit_screener)
+
+    _, stats_none = run_with_errors(set())
+    _, stats_three = run_with_errors({"S0USDT", "S1USDT", "S2USDT"})
+
+    sent_messages = []
+
+    def fake_send(text):
+        sent_messages.append(text)
+        return True
+
+    def run_screener_with(result=None, error=None):
+        sent_messages.clear()
+
+        def fake_run():
+            if error is not None:
+                raise error
+            return result
+
+        with patched(run_bybit_screener=fake_run, send_telegram_message_safe=fake_send):
+            return raises(run_screener)
+
+    def stats(analyzed, errors):
+        return {"total_universe": 100, "prefiltered": analyzed + errors, "analyzed": analyzed, "errors": errors, "active": 0}
+
+    exit_incomplete = run_screener_with(result=(pd.DataFrame(), stats(4, 6)))
+    incomplete_messages = list(sent_messages)
+    exit_fetch_error = run_screener_with(error=Exception("Bybit HTTP error: 403"))
+    fetch_error_messages = list(sent_messages)
+    exit_partial = run_screener_with(result=(pd.DataFrame(), stats(8, 2)))
+    partial_messages = list(sent_messages)
+    exit_ok = run_screener_with(result=(pd.DataFrame(), stats(10, 0)))
+    ok_messages = list(sent_messages)
+
+    def call_bybit_with(session):
+        with patched(SESSION=session), proxy_env():
+            return bybit_get("/v5/market/kline", {"category": "linear", "symbol": "XUSDT"}, label="Bybit kline")
+
+    ok_session = FakeSession({"retCode": 0, "retMsg": "OK", "result": {"list": [1]}})
+    call_bybit_with(ok_session)
+
+    with proxy_env():
+        configured_url, configured_secret = get_bybit_proxy_config()
+    with proxy_env(url="https://my-worker.example.workers.dev", secret="s3cret-xyz"):
+        redacted_text = redact_proxy_details(
+            "failed https://my-worker.example.workers.dev/bybit/v5 host=my-worker.example.workers.dev token=s3cret-xyz"
+        )
+    with proxy_env(url=None, secret=None):
+        missing_both = raises(get_bybit_proxy_config)
+    with proxy_env(url="https://leak-check.example.com", secret=None):
+        missing_secret = raises(get_bybit_proxy_config)
+
+    tests = [
+        # --- configuration and requests
+        ("config: both variables missing -> clear error", isinstance(missing_both, RuntimeError)
+            and "BYBIT_PROXY_URL" in str(missing_both) and "BYBIT_PROXY_SECRET" in str(missing_both)),
+        ("config: error does not show configured values", isinstance(missing_secret, RuntimeError)
+            and "leak-check" not in str(missing_secret) and "BYBIT_PROXY_SECRET" in str(missing_secret)),
+        ("config: values are read, trailing slash is removed", configured_url == "https://proxy.example.com" and configured_secret == "test-secret-value"),
+        ("request: URL goes through proxy /bybit prefix", ok_session.calls[0]["url"] == "https://proxy.example.com/bybit/v5/market/kline"),
+        ("request: X-Proxy-Secret header is sent", ok_session.calls[0]["headers"] == {"X-Proxy-Secret": "test-secret-value"}),
+        ("request: query params are passed", ok_session.calls[0]["params"] == {"category": "linear", "symbol": "XUSDT"}),
+        ("request: retCode != 0 raises", raises(call_bybit_with, FakeSession({"retCode": 10001, "retMsg": "bad", "result": {}})) is not None),
+        ("request: HTTP 401 raises", raises(call_bybit_with, FakeSession({"error": "unauthorized"}, status_code=401)) is not None),
+        ("redaction: URL, host and secret are hidden in log text", redacted_text == "failed ***/bybit/v5 host=*** token=***"),
+        ("request: errors never contain the secret", "test-secret-value" not in str(raises(call_bybit_with, FakeSession({"retCode": 10001, "retMsg": "bad", "result": {}})))),
+
+        # --- candles
+        ("candles: sorted oldest first", list(df_k["close"]) == [10.0, 10.5, 10.8]),
+        ("candles: columns", list(df_k.columns) == ["timestamp", "open", "high", "low", "close", "volume", "quote_volume"]),
+        ("candles: no confirm column", "confirm" not in df_k.columns),
+        ("candles: quote_volume is turnover", list(df_k["quote_volume"]) == [790.0, 950.0, 1080.0]),
+        ("candles: numeric dtypes", all(str(df_k[c].dtype).startswith("float") for c in ["open", "high", "low", "close", "volume", "quote_volume"])),
+        ("candles: timestamp from ms", df_k["timestamp"].iloc[0] == pd.to_datetime(1781524800000, unit="ms")),
+        ("candles: last row is live", float(bybit_get_last_live_candle(df_k)["close"]) == 10.8),
+        ("candles: previous row is last closed", float(bybit_get_last_closed_candle(df_k)["close"]) == 10.5),
+        ("candles: too few columns raises", raises(bybit_candles_to_dataframe, [["1781532000000", "1", "2", "3", "4", "5"]]) is not None),
+        ("candles: empty rows give empty dataframe", bybit_candles_to_dataframe([]).empty),
+        ("volume: 24h sum excludes live candle", bybit_closed_24h_quote_volume(pd.DataFrame({"quote_volume": [1.0] * 24 + [999.0]})) == 24.0),
+        ("volume: change vs previous 24h", abs(bybit_volume_change_24h(pd.DataFrame({"quote_volume": [1.0] * 24 + [2.0] * 24 + [999.0]})) - 100.0) < 1e-9),
+        ("volume: not enough candles -> None", bybit_closed_24h_quote_volume(pd.DataFrame({"quote_volume": [1.0] * 10})) is None),
+
+        # --- universe
+        ("instruments: only LinearPerpetual USDT Trading", list(df_inst["symbol"]) == ["AAAUSDT", "EEEUSDT"]),
+        ("tickers: 24h change ratio -> percent", abs(float(df_tick.loc[df_tick["symbol"] == "AAAUSDT", "price_change_24h_percent"].iloc[0]) - 12.73) < 1e-9),
+        ("tickers: turnover is USDT volume", float(df_tick.loc[df_tick["symbol"] == "AAAUSDT", "volume_usd_24h_est"].iloc[0]) == 74340000.0),
+        ("universe: dated futures are excluded", "BBBUSDT" not in list(df_universe["symbol"])),
+        ("prefilter: change >= 8% and volume >= 5M", list(df_pre["symbol"]) == ["AAAUSDT"]),
+
+        # --- full candidate pipeline on fake API data
+        ("candidate: exchange and provider are Bybit", candidate["exchange"] == "Bybit" and candidate["provider"] == "Bybit"),
+        ("candidate: report symbol has .P suffix", candidate["symbol"] == "TESTUSDT.P"),
+        ("candidate: OI source is Bybit with history", candidate["oi_source"] == "Bybit" and candidate["oi_history_points"] == 200),
+        ("candidate: all five factors analyzed", candidate["total_short_factors_count"] == 5),
+        ("candidate: price change comes from ticker", candidate["price_change_24h_percent"] == 25.0),
+
+        # --- 2.5 data quality
+        ("quality: no errors -> ok", classify_data_quality(10, 0) == "ok"),
+        ("quality: no candidates -> ok", classify_data_quality(0, 0) == "ok"),
+        ("quality: 1 of 10 failed -> partial", classify_data_quality(10, 1) == "partial"),
+        ("quality: exactly half failed -> partial", classify_data_quality(10, 5) == "partial"),
+        ("quality: more than half failed -> incomplete", classify_data_quality(10, 6) == "incomplete"),
+        ("quality: all failed -> incomplete", classify_data_quality(5, 5) == "incomplete"),
+        ("runner: no errors counted", stats_none["errors"] == 0 and stats_none["analyzed"] == 10),
+        ("runner: errors are counted per symbol", stats_three["errors"] == 3 and stats_three["analyzed"] == 7),
+        ("warning line text", format_data_warning_line(7, 10, 3) == "⚠️ Проаналізовано 7 з 10 кандидатів, 3 помилок"),
+        ("report: warning line is shown", "⚠️ Проаналізовано 7 з 10 кандидатів, 3 помилок" in format_telegram_report([], data_warning=format_data_warning_line(7, 10, 3))),
+        ("report: no warning without errors", "⚠️" not in format_telegram_report([])),
+        ("run: >half failed -> exit code 1", isinstance(exit_incomplete, SystemExit) and exit_incomplete.code == 1),
+        ("run: >half failed -> 'data incomplete' message, not 'No signals'",
+            len(incomplete_messages) == 1 and "Дані неповні" in incomplete_messages[0] and "No overheat" not in incomplete_messages[0]),
+        ("run: market data failure -> exit code 1 and warning",
+            isinstance(exit_fetch_error, SystemExit) and exit_fetch_error.code == 1
+            and len(fetch_error_messages) == 1 and "список монет" in fetch_error_messages[0]),
+        ("run: some errors -> normal report with warning line, exit 0",
+            exit_partial is None and len(partial_messages) == 1
+            and "Проаналізовано 8 з 10 кандидатів, 2 помилок" in partial_messages[0]
+            and "No overheat or short-watch signals" in partial_messages[0]),
+        ("run: no errors -> normal report without warning",
+            exit_ok is None and len(ok_messages) == 1 and "⚠️" not in ok_messages[0]),
+    ]
+
+    failed = 0
+    for name, passed in tests:
+        status = "PASS" if passed else "FAIL"
+        print(f"{status} | {name}")
+
+        if not passed:
+            failed += 1
+
+    if failed:
+        raise AssertionError(f"Bybit self-tests failed: {failed}/{len(tests)}")
+
+    print(f"BYBIT SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
 def main():
     if "--self-test" in sys.argv:
         run_sweep_self_tests()
@@ -7419,10 +7317,17 @@ def main():
         run_open_interest_self_tests()
         run_rsi_divergence_self_tests()
         run_oi_divergence_self_tests()
+        run_bybit_self_tests()
         return
 
     get_telegram_credentials()
-    run_multi_provider_screener()
+
+    try:
+        get_bybit_proxy_config()
+    except RuntimeError as e:
+        raise SystemExit(f"ERROR: {e}")
+
+    run_screener()
 
 
 if __name__ == "__main__":

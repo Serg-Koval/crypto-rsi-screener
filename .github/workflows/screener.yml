@@ -32,4 +32,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BYBIT_PROXY_URL: ${{ secrets.BYBIT_PROXY_URL }}
+          BYBIT_PROXY_SECRET: ${{ secrets.BYBIT_PROXY_SECRET }}
         run: python main.py
