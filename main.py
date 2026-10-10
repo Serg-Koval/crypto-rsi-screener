@@ -71,17 +71,6 @@ LIQUIDITY_SWEEP_SWING_RIGHT_BARS = 2
 LIQUIDITY_SWEEP_MIN_SINGLE_HIGH_PROMINENCE_PCT = 0.0020 # 0.20% above nearby highs
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_1H = 240
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_4H = 120
-PREMIUM_ZONE_LOOKBACK = 72
-PREMIUM_ZONE_LOOKBACK_1H = 72
-PREMIUM_ZONE_LOOKBACK_4H = 42
-LOCAL_HIGH_LOOKBACKS = {
-    "24H": 24,
-    "48H": 48,
-    "7D": 168,
-}
-# Local high is evaluated over the recent setup window, not only the latest live candle.
-# This keeps the factor aligned with a sweep event that may have occurred a few candles before the scan.
-LOCAL_HIGH_RECENT_WINDOW_BARS = 6
 
 # Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
 OPEN_LEVEL_NEAR_THRESHOLDS = {
@@ -1330,112 +1319,6 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
         )
 
     return make_confirmed_sweep_factor(best_level, best_confirm_tf, best_confirm_candle)
-
-
-def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS, recent_window_bars=LOCAL_HIGH_RECENT_WINDOW_BARS):
-    """
-    Detect whether the recent setup window updated a local 24H / 48H / 7D high.
-
-    Earlier versions checked only the very last 1H candle. That could miss a
-    local-high update when the sweep/pump candle happened a few candles before
-    the scan and the latest candle had already pulled back.
-
-    This factor is still context only, not a trigger.
-    """
-
-    if df_1h is None or df_1h.empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="no 1H candles",
-        )
-
-    if "high" not in df_1h.columns:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="1H high column unavailable",
-        )
-
-    df = df_1h.copy().reset_index(drop=True)
-    highs = pd.to_numeric(df["high"], errors="coerce")
-
-    if highs.dropna().empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="1H highs unavailable",
-        )
-
-    window = max(1, int(recent_window_bars or 1))
-    window = min(window, len(df))
-    setup_slice = highs.iloc[-window:]
-
-    if setup_slice.dropna().empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="recent 1H highs unavailable",
-        )
-
-    setup_high = float(setup_slice.max())
-
-    # Check the highest-confidence tiers first. Points are not cumulative.
-    tiers = [
-        ("7D", lookbacks["7D"], 3),
-        ("48H", lookbacks["48H"], 2),
-        ("24H", lookbacks["24H"], 1),
-    ]
-
-    checked_any = False
-
-    for label, lookback, points in tiers:
-        # Need enough candles before the setup window to compare against.
-        if len(df) < lookback + window:
-            continue
-
-        previous = highs.iloc[-(lookback + window):-window]
-
-        if previous.dropna().empty:
-            continue
-
-        checked_any = True
-        previous_high = float(previous.max())
-
-        if setup_high > previous_high:
-            factor = make_factor(
-                key="local_high_update",
-                label="Local high update",
-                status="confirmed",
-                points=points,
-                detail=f"{label} high updated",
-            )
-            factor["setup_high"] = setup_high
-            factor["previous_high"] = previous_high
-            factor["recent_window_bars"] = int(window)
-            return factor
-
-    if checked_any:
-        factor = make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_confirmed",
-            detail="no 24H/48H/7D high update",
-        )
-        factor["setup_high"] = setup_high
-        factor["recent_window_bars"] = int(window)
-        return factor
-
-    return make_factor(
-        key="local_high_update",
-        label="Local high update",
-        status="not_enough_data",
-        detail="requires enough 1H candles before setup window",
-    )
 
 
 # ============================================================
@@ -6778,31 +6661,6 @@ def make_classification_sweep_factor():
     )
 
 
-def make_classification_premium_factor(points=0):
-    factor = make_factor(
-        key="premium_zone",
-        label="Premium zone",
-        status="confirmed" if points > 0 else "not_confirmed",
-        points=points,
-        detail="1H: Neutral | 4H: Neutral",
-    )
-    factor["premium_1h_label"] = "Neutral"
-    factor["premium_1h_position"] = 0.50
-    factor["premium_4h_label"] = "Neutral"
-    factor["premium_4h_position"] = 0.50
-    return factor
-
-
-def make_classification_local_high_factor(points=0):
-    return make_factor(
-        key="local_high_update",
-        label="Local high update",
-        status="confirmed" if points > 0 else "not_confirmed",
-        points=points,
-        detail="1H: no 24H/48H/7D high update",
-    )
-
-
 def make_classification_rsi_divergence_factor():
     factor = make_factor(
         key="rsi_divergence",
@@ -6844,8 +6702,6 @@ def run_open_levels_classification_self_tests():
             base_scores,
             [
                 make_classification_sweep_factor(),
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "SHORT_WATCH",
@@ -6854,8 +6710,6 @@ def run_open_levels_classification_self_tests():
             "W open tested without sweep cannot create SHORT WATCH",
             base_scores,
             [
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "NO_SIGNAL",
@@ -6865,8 +6719,6 @@ def run_open_levels_classification_self_tests():
             strong_heat_scores,
             [
                 make_classification_sweep_factor(),
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "SHORT_WATCH",
@@ -6908,72 +6760,6 @@ def run_open_levels_classification_self_tests():
         raise AssertionError(f"Open levels classification self-tests failed: {failed}/{len(tests)}")
 
     print(f"OPEN LEVELS CLASSIFICATION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
-
-
-def make_local_high_recent_update_case(updated=True):
-    rows = []
-
-    # Build enough 1H candles to validate 24H local-high update over a recent setup window.
-    for i in range(35):
-        confirm = 0 if i == 34 else 1
-        high = 100.0
-        open_price = 95.0
-        low = 94.0
-        close = 96.0
-
-        if i >= 29:
-            high = 98.0
-
-        # Setup candle is not the latest candle. This catches the false-negative
-        # case where the last candle has already pulled back.
-        if updated and i == 31:
-            high = 110.0
-            open_price = 101.0
-            low = 99.0
-            close = 104.0
-
-        rows.append((open_price, high, low, close, confirm))
-
-    return make_synthetic_ohlcv(rows, freq="1h")
-
-
-def run_local_high_self_tests():
-    print("\n" + "=" * 120)
-    print("RUNNING LOCAL HIGH SELF TESTS")
-    print("SCRIPT VERSION:", SCRIPT_VERSION)
-    print("=" * 120)
-
-    tests = [
-        (
-            "recent setup high updated even if latest candle pulled back",
-            detect_local_high_update(make_local_high_recent_update_case(updated=True)),
-            "confirmed",
-            "24H high updated",
-        ),
-        (
-            "recent setup window without new high",
-            detect_local_high_update(make_local_high_recent_update_case(updated=False)),
-            "not_confirmed",
-            "no 24H/48H/7D high update",
-        ),
-    ]
-
-    failed = 0
-
-    for name, result, expected_status, expected_detail in tests:
-        actual_status = str(result.get("status"))
-        detail = str(result.get("detail", ""))
-        ok = actual_status == expected_status and expected_detail in detail
-        status_text = "PASS" if ok else "FAIL"
-        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
-
-        if not ok:
-            failed += 1
-
-    if failed > 0:
-        raise AssertionError(f"Local high self-tests failed: {failed}/{len(tests)}")
-
-    print(f"LOCAL HIGH SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
 def run_sweep_self_tests():
@@ -7641,7 +7427,6 @@ def main():
         run_open_levels_self_tests()
         run_open_levels_classification_self_tests()
         run_rejection_self_tests()
-        run_local_high_self_tests()
         run_rsi_entry_filter_self_tests()
         run_overheat_context_self_tests()
         run_open_interest_self_tests()
