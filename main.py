@@ -24,7 +24,6 @@ RSI_PERIOD = 14
 
 # Watch thresholds.
 # Closed 4H RSI is intentionally not used in signal classification.
-EARLY_PUMP_RSI_1H_LIVE = 82
 EARLY_PUMP_PRICE_CHANGE_24H = 8
 
 PUMP_WATCH_PRICE_CHANGE_24H = 10
@@ -38,7 +37,6 @@ OVERHEAT_WATCH_MIN_VOLUME_USD_24H = 5_000_000
 EXTREME_PUMP_RSI_1H_LIVE = 85
 EXTREME_PUMP_RSI_4H_LIVE = 80
 EXTREME_PUMP_PRICE_CHANGE_24H = 20
-EXTREME_PUMP_VOLUME_CHANGE_24H = 100
 
 RSI_1H_CLOSED_CONFIRMATION = OVERHEAT_WATCH_RSI_1H_CLOSED
 
@@ -104,7 +102,6 @@ OI_HISTORY_PERIOD = "1H"
 OI_HISTORY_LOOKBACK_HOURS = 12
 OI_CHANGE_FLAT_THRESHOLD_PCT = 2.0
 OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT = 3.0
-OI_CHANGE_4H_ACTIVE_THRESHOLD_PCT = 5.0
 OI_CHANGE_STRONG_4H_THRESHOLD_PCT = 10.0
 OI_CHANGE_NEGATIVE_THRESHOLD_PCT = -5.0
 
@@ -1447,14 +1444,6 @@ def price_high_relation(candidate_high, prior_high, min_hh_pct=None, equal_toler
     return "none"
 
 
-def divergence_relation_label(relation):
-    if relation == "equal_high":
-        return "equal high"
-    if relation == "higher_high":
-        return "bearish"
-    return "bearish"
-
-
 def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
     """
     Detect bearish RSI divergence:
@@ -1544,7 +1533,6 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
         rsi_lower_high = float(candidate_rsi) <= float(prior_rsi) - float(RSI_DIVERGENCE_MIN_RSI_DROP)
 
         if relation in ("higher_high", "equal_high") and rsi_lower_high:
-            label = divergence_relation_label(relation)
             detail = f"{timeframe} RSI bearish" if relation == "higher_high" else f"{timeframe} RSI bearish equal high"
             return {
                 "status": "confirmed",
@@ -3555,7 +3543,6 @@ def calculate_location_trigger_context(short_factors):
 
     open_levels = get_short_factor(short_factors, "open_levels") or {}
     liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
-    rejection = get_short_factor(short_factors, "rejection_candle") or {}
 
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
     rejection_confirmed = is_factor_confirmed(short_factors, "rejection_candle")
@@ -4197,7 +4184,6 @@ def format_oi_line_for_telegram(detail):
         return ""
 
     source = str(detail.get("oi_source", detail.get("exchange", "")) or "")
-    status = str(detail.get("oi_status", "") or "")
     context = str(detail.get("oi_context", "N/A") or "N/A")
     change_1h = detail.get("oi_change_1h_percent")
     change_4h = detail.get("oi_change_4h_percent")
