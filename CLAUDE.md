@@ -22,7 +22,8 @@ Telegram-скринер перегріву і short watch на USDT-перпет
 ## Файли
 - `main.py` — весь аналіз і відправка в Telegram.
 - `.github/workflows/screener.yml` — основний workflow (запускається лише вручну або з Worker).
-- `bitget_screener_test.py`, `main_multi_test.py`, `provider_test.py`, `bybit_test.py`, `main_backup_2026 06 08` та тестові workflow — допоміжні. Без прямого завдання їх не змінювати і не видаляти.
+- `tests/golden_test.py` і `tests/golden_expected.json` — «золотий» регресійний тест (`python tests/golden_test.py`), має показувати «без відмінностей». Очікуваний файл перезаписується (`--update`) лише свідомо.
+- `.github/workflows/bybit-test.yml` — допоміжний workflow (які ендпоінти Bybit відповідають з GitHub Actions). Без прямого завдання його не змінювати; видаляється в кінці міграції на Bybit.
 - `README.md` застарів (описує OKX). Оновлюється окремим завданням.
 
 ## Мова коду
