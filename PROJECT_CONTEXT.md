@@ -38,7 +38,7 @@ Cloudflare Worker (ladovka-screener-dispatcher)
 - Міграція на Bybit ще не виконана. Завдання для неї описане в `bybit-migration-task-free.md` (5 етапів: проксі у Worker, Bybit-провайдер, self-тести, workflow, прибирання).
 - Причина міграції: GitHub Actions не може звертатися до Bybit API (HTTP 403, геоблок), а Cloudflare Worker доходить (HTTP 200). План: Worker стає проксі-ендпоінтом `GET /bybit/*` із секретом `X-Proxy-Secret` і whitelist шляхів; аналіз лишається в Python на GitHub Actions. Логіка аналізу при міграції НЕ змінюється.
 - `README.md` застарів: описує «OKX USDT perpetual RSI screener» і ручний workflow «OKX RSI Screener».
-- У репозиторії лежать допоміжні файли: `main_backup_2026 06 08`, `main_multi_test.py`, `bitget_screener_test.py`, `provider_test.py`, `bybit_test.py`, а також тестові workflow (`bitget-screener-test`, `bybit-test`, `multi-screener-test`, `provider-test`). `bybit-test.yml` перевіряє, які ендпоінти Bybit відповідають з GitHub Actions.
+- З допоміжних файлів лишилися `tests/golden_test.py` (+ `tests/golden_expected.json`, «золотий» регресійний тест) і workflow `bybit-test.yml`, який перевіряє, які ендпоінти Bybit відповідають з GitHub Actions. Старі прототипи й одноразові тести видалено.
 - Self-тести: `python main.py --self-test` (sweep, open levels, класифікація, rejection, local high, RSI-фільтр входу, overheat, OI, RSI-дивергенція, OI-дивергенція).
 
 ## 4. Конвеєр аналізу (по кроках)
