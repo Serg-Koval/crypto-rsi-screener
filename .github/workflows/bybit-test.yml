@@ -1,15 +1,81 @@
 name: bybit-test
+
+# Manual check of the Bybit proxy that lives in the Cloudflare Worker:
+# GitHub Actions -> Cloudflare Worker (/bybit/*) -> Bybit.
+# Needs GitHub secrets BYBIT_PROXY_URL and BYBIT_PROXY_SECRET.
 on: workflow_dispatch
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BYBIT_PROXY_URL: ${{ secrets.BYBIT_PROXY_URL }}
+      BYBIT_PROXY_SECRET: ${{ secrets.BYBIT_PROXY_SECRET }}
     steps:
-      - run: |
-          B=https://api.bybit.com/v5/market
-          for p in "kline?category=linear&symbol=ATOMUSDT&interval=60&limit=3" \
-                   "open-interest?category=linear&symbol=ATOMUSDT&intervalTime=1h&limit=3" \
-                   "funding/history?category=linear&symbol=ATOMUSDT&limit=3" \
-                   "account-ratio?category=linear&symbol=ATOMUSDT&period=1h&limit=3" \
-                   "recent-trade?category=linear&symbol=ATOMUSDT&limit=3"; do
-            echo "== $p"; curl -s -o /tmp/r -w "HTTP %{http_code}\n" "$B/$p"; head -c 400 /tmp/r; echo
-          done
+      - name: Test Bybit proxy
+        run: |
+          set -u
+
+          if [ -z "$BYBIT_PROXY_URL" ] || [ -z "$BYBIT_PROXY_SECRET" ]; then
+            echo "FAIL: BYBIT_PROXY_URL or BYBIT_PROXY_SECRET is missing in GitHub secrets"
+            exit 1
+          fi
+
+          BASE="${BYBIT_PROXY_URL%/}/bybit/v5/market"
+          FAILED=0
+
+          # Expect: HTTP 200, Bybit retCode 0 and at least MIN_ROWS rows in result.list
+          check_data() {
+            name="$1"; path="$2"; min_rows="$3"
+            code=$(curl -s -o /tmp/resp -w "%{http_code}" --max-time 30 \
+              -H "X-Proxy-Secret: $BYBIT_PROXY_SECRET" "$BASE/$path")
+            summary=$(python3 - <<'PY'
+          import json
+          try:
+              data = json.load(open("/tmp/resp"))
+              rows = len(data.get("result", {}).get("list", []))
+              print(f"retCode={data.get('retCode')} rows={rows}")
+          except Exception:
+              print("retCode=not-json rows=0")
+          PY
+          )
+            rows=$(echo "$summary" | sed -n 's/.*rows=\([0-9]*\).*/\1/p')
+            if [ "$code" = "200" ] && echo "$summary" | grep -q "retCode=0 " && [ "${rows:-0}" -ge "$min_rows" ]; then
+              echo "PASS | $name | HTTP $code | $summary"
+            else
+              echo "FAIL | $name | HTTP $code | $summary"
+              head -c 300 /tmp/resp; echo
+              FAILED=1
+            fi
+          }
+
+          # Expect an exact HTTP status
+          check_status() {
+            name="$1"; expected="$2"; path="$3"; shift 3
+            code=$(curl -s -o /tmp/resp -w "%{http_code}" --max-time 30 "$@" "$BASE/$path")
+            if [ "$code" = "$expected" ]; then
+              echo "PASS | $name | HTTP $code"
+            else
+              echo "FAIL | $name | expected HTTP $expected, got HTTP $code"
+              head -c 300 /tmp/resp; echo
+              FAILED=1
+            fi
+          }
+
+          echo "== Data through the proxy (must be HTTP 200 and retCode 0)"
+          check_data "tickers"          "tickers?category=linear" 100
+          check_data "instruments-info" "instruments-info?category=linear&limit=1000" 100
+          check_data "kline 1H BTCUSDT" "kline?category=linear&symbol=BTCUSDT&interval=60&limit=3" 3
+          check_data "open-interest 1h" "open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h&limit=3" 3
+
+          echo "== Protection (must be rejected)"
+          check_status "no secret -> 401"        401 "tickers?category=linear"
+          check_status "wrong secret -> 401"     401 "tickers?category=linear" -H "X-Proxy-Secret: wrong-secret"
+          check_status "other path -> 404"       404 "time" -H "X-Proxy-Secret: $BYBIT_PROXY_SECRET"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "RESULT: FAILED"
+            exit 1
+          fi
+          echo "RESULT: ALL CHECKS PASSED"
