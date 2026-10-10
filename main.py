@@ -24,7 +24,6 @@ RSI_PERIOD = 14
 
 # Watch thresholds.
 # Closed 4H RSI is intentionally not used in signal classification.
-EARLY_PUMP_RSI_1H_LIVE = 82
 EARLY_PUMP_PRICE_CHANGE_24H = 8
 
 PUMP_WATCH_PRICE_CHANGE_24H = 10
@@ -38,7 +37,6 @@ OVERHEAT_WATCH_MIN_VOLUME_USD_24H = 5_000_000
 EXTREME_PUMP_RSI_1H_LIVE = 85
 EXTREME_PUMP_RSI_4H_LIVE = 80
 EXTREME_PUMP_PRICE_CHANGE_24H = 20
-EXTREME_PUMP_VOLUME_CHANGE_24H = 100
 
 RSI_1H_CLOSED_CONFIRMATION = OVERHEAT_WATCH_RSI_1H_CLOSED
 
@@ -71,17 +69,6 @@ LIQUIDITY_SWEEP_SWING_RIGHT_BARS = 2
 LIQUIDITY_SWEEP_MIN_SINGLE_HIGH_PROMINENCE_PCT = 0.0020 # 0.20% above nearby highs
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_1H = 240
 LIQUIDITY_SWEEP_LEVEL_LOOKBACK_4H = 120
-PREMIUM_ZONE_LOOKBACK = 72
-PREMIUM_ZONE_LOOKBACK_1H = 72
-PREMIUM_ZONE_LOOKBACK_4H = 42
-LOCAL_HIGH_LOOKBACKS = {
-    "24H": 24,
-    "48H": 48,
-    "7D": 168,
-}
-# Local high is evaluated over the recent setup window, not only the latest live candle.
-# This keeps the factor aligned with a sweep event that may have occurred a few candles before the scan.
-LOCAL_HIGH_RECENT_WINDOW_BARS = 6
 
 # Open levels are location/context amplifiers. They are not triggers, but they can strengthen signal_level when a confirmed sweep exists.
 OPEN_LEVEL_NEAR_THRESHOLDS = {
@@ -115,7 +102,6 @@ OI_HISTORY_PERIOD = "1H"
 OI_HISTORY_LOOKBACK_HOURS = 12
 OI_CHANGE_FLAT_THRESHOLD_PCT = 2.0
 OI_CHANGE_1H_ACTIVE_THRESHOLD_PCT = 3.0
-OI_CHANGE_4H_ACTIVE_THRESHOLD_PCT = 5.0
 OI_CHANGE_STRONG_4H_THRESHOLD_PCT = 10.0
 OI_CHANGE_NEGATIVE_THRESHOLD_PCT = -5.0
 
@@ -337,22 +323,6 @@ def format_percent_2(value, show_plus=True):
     return f"{value:.2f}"
 
 
-def parse_float_from_value(value):
-    if value is None:
-        return None
-
-    try:
-        text = str(value).replace("%", "").replace("+", "").strip()
-
-        if text.upper() == "N/A":
-            return None
-
-        return float(text)
-
-    except Exception:
-        return None
-
-
 def safe_float(value, default=np.nan):
     try:
         if value is None or pd.isna(value):
@@ -449,19 +419,6 @@ def make_factor(key, label, status, points=0, detail=""):
     }
 
 
-def get_volume_series(df):
-    """
-    Return the best available volume column for relative volume checks.
-    Quote volume is preferred because it is comparable across instruments.
-    """
-
-    for col in ["quote_volume", "volume", "base_volume", "volume_currency"]:
-        if col in df.columns:
-            return pd.to_numeric(df[col], errors="coerce")
-
-    return pd.Series([np.nan] * len(df), index=df.index)
-
-
 def get_last_closed_candle_for_analysis(df):
     """
     Return the last closed candle for factor analysis.
@@ -507,7 +464,6 @@ def get_live_candle_for_analysis(df):
     return work_df.iloc[live_index], live_index
 
 
-
 def get_timeframe_hours(timeframe):
     if timeframe == "4H":
         return 4
@@ -526,7 +482,6 @@ def get_candle_time(candle):
         return None
 
     return None
-
 
 
 def calculate_level_age_hours(candidate_index, level_index, timeframe="1H", candidate_time=None, level_time=None):
@@ -959,65 +914,6 @@ def get_candle_timestamp_value(candle):
     return None
 
 
-def get_index_before_time(df, timestamp):
-    if df is None or df.empty or timestamp is None or "timestamp" not in df.columns:
-        return None
-
-    timestamps = pd.to_datetime(df["timestamp"], errors="coerce")
-    valid = timestamps < pd.to_datetime(timestamp)
-
-    if not valid.any():
-        return None
-
-    return int(valid[valid].index[-1]) + 1
-
-
-def previous_high_info_before_index(df, candle_index, lookback):
-    """
-    Compatibility helper for older diagnostics. The sweep model now uses
-    level-based liquidity detection instead of a single rolling high.
-    """
-
-    if df is None or df.empty:
-        return None
-
-    if candle_index is None:
-        return None
-
-    if candle_index < lookback:
-        return None
-
-    previous = df.iloc[candle_index - lookback:candle_index]
-
-    if previous.empty:
-        return None
-
-    highs = pd.to_numeric(previous["high"], errors="coerce")
-    valid_highs = highs.dropna()
-
-    if valid_highs.empty:
-        return None
-
-    high_index = int(valid_highs.idxmax())
-    previous_high = float(valid_highs.loc[high_index])
-    level_age_bars = int(candle_index - high_index)
-
-    return {
-        "high": previous_high,
-        "index": high_index,
-        "age_bars": level_age_bars,
-    }
-
-
-def previous_high_before_index(df, candle_index, lookback):
-    high_info = previous_high_info_before_index(df, candle_index, lookback)
-
-    if high_info is None:
-        return None
-
-    return float(high_info["high"])
-
-
 def evaluate_sweep_against_previous_high(
     candle,
     previous_high,
@@ -1421,233 +1317,6 @@ def detect_liquidity_sweep(df_1h, df_4h=None, lookbacks=LIQUIDITY_SWEEP_LOOKBACK
 
     return make_confirmed_sweep_factor(best_level, best_confirm_tf, best_confirm_candle)
 
-def classify_premium_position(position):
-    if position is None or pd.isna(position):
-        return "N/A"
-
-    position = float(position)
-
-    if position > 1.0:
-        return "Above Range High"
-
-    if position >= 0.786:
-        return "Extreme Premium"
-
-    if position >= 0.618:
-        return "Premium"
-
-    if position <= 0.382:
-        return "Discount"
-
-    return "Neutral"
-
-
-def calculate_premium_position(df, lookback):
-    if df is None or df.empty or len(df) < lookback + 1:
-        return {
-            "status": "not_enough_data",
-            "position": None,
-            "label": "N/A",
-            "detail": f"requires {lookback + 1} candles",
-        }
-
-    work_df = df.copy().reset_index(drop=True)
-    current = work_df.iloc[-1]
-    previous = work_df.iloc[-(lookback + 1):-1]
-
-    range_low = float(previous["low"].min())
-    range_high = float(previous["high"].max())
-    current_price = float(current["close"])
-    range_size = range_high - range_low
-
-    if range_size <= 0:
-        return {
-            "status": "not_enough_data",
-            "position": None,
-            "label": "N/A",
-            "detail": "invalid range",
-        }
-
-    position = (current_price - range_low) / range_size
-    label = classify_premium_position(position)
-
-    return {
-        "status": "ok",
-        "position": float(position),
-        "label": label,
-        "detail": f"{label} {position:.2f}",
-    }
-
-
-def detect_premium_zone(
-    df_1h,
-    df_4h=None,
-    lookback_1h=PREMIUM_ZONE_LOOKBACK_1H,
-    lookback_4h=PREMIUM_ZONE_LOOKBACK_4H,
-):
-    premium_1h = calculate_premium_position(df_1h, lookback_1h)
-    premium_4h = calculate_premium_position(df_4h, lookback_4h) if df_4h is not None else {
-        "status": "not_enough_data",
-        "position": None,
-        "label": "N/A",
-        "detail": "4H candles unavailable",
-    }
-
-    labels = []
-    points = 0
-    confirmed = False
-    not_enough_data = True
-
-    for tf, item in [("1H", premium_1h), ("4H", premium_4h)]:
-        status = item.get("status")
-        label = item.get("label", "N/A")
-        position = item.get("position")
-
-        if status == "ok":
-            not_enough_data = False
-
-            if position is not None and not pd.isna(position):
-                labels.append(f"{tf}: {label} / {float(position):.2f}")
-            else:
-                labels.append(f"{tf}: {label}")
-
-            if label in ("Above Range High", "Extreme Premium"):
-                points += 2
-                confirmed = True
-            elif label == "Premium":
-                points += 1
-                confirmed = True
-        else:
-            labels.append(f"{tf}: N/A")
-
-    # Premium should matter, but should not dominate the setup score by itself.
-    points = min(points, 3)
-
-    detail = " | ".join(labels)
-
-    factor = make_factor(
-        key="premium_zone",
-        label="Premium zone",
-        status="confirmed" if confirmed else ("not_enough_data" if not_enough_data else "not_confirmed"),
-        points=points,
-        detail=detail,
-    )
-
-    factor["premium_1h_label"] = premium_1h.get("label", "N/A")
-    factor["premium_1h_position"] = premium_1h.get("position")
-    factor["premium_4h_label"] = premium_4h.get("label", "N/A")
-    factor["premium_4h_position"] = premium_4h.get("position")
-
-    return factor
-
-
-def detect_local_high_update(df_1h, lookbacks=LOCAL_HIGH_LOOKBACKS, recent_window_bars=LOCAL_HIGH_RECENT_WINDOW_BARS):
-    """
-    Detect whether the recent setup window updated a local 24H / 48H / 7D high.
-
-    Earlier versions checked only the very last 1H candle. That could miss a
-    local-high update when the sweep/pump candle happened a few candles before
-    the scan and the latest candle had already pulled back.
-
-    This factor is still context only, not a trigger.
-    """
-
-    if df_1h is None or df_1h.empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="no 1H candles",
-        )
-
-    if "high" not in df_1h.columns:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="1H high column unavailable",
-        )
-
-    df = df_1h.copy().reset_index(drop=True)
-    highs = pd.to_numeric(df["high"], errors="coerce")
-
-    if highs.dropna().empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="1H highs unavailable",
-        )
-
-    window = max(1, int(recent_window_bars or 1))
-    window = min(window, len(df))
-    setup_slice = highs.iloc[-window:]
-
-    if setup_slice.dropna().empty:
-        return make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_enough_data",
-            detail="recent 1H highs unavailable",
-        )
-
-    setup_high = float(setup_slice.max())
-
-    # Check the highest-confidence tiers first. Points are not cumulative.
-    tiers = [
-        ("7D", lookbacks["7D"], 3),
-        ("48H", lookbacks["48H"], 2),
-        ("24H", lookbacks["24H"], 1),
-    ]
-
-    checked_any = False
-
-    for label, lookback, points in tiers:
-        # Need enough candles before the setup window to compare against.
-        if len(df) < lookback + window:
-            continue
-
-        previous = highs.iloc[-(lookback + window):-window]
-
-        if previous.dropna().empty:
-            continue
-
-        checked_any = True
-        previous_high = float(previous.max())
-
-        if setup_high > previous_high:
-            factor = make_factor(
-                key="local_high_update",
-                label="Local high update",
-                status="confirmed",
-                points=points,
-                detail=f"{label} high updated",
-            )
-            factor["setup_high"] = setup_high
-            factor["previous_high"] = previous_high
-            factor["recent_window_bars"] = int(window)
-            return factor
-
-    if checked_any:
-        factor = make_factor(
-            key="local_high_update",
-            label="Local high update",
-            status="not_confirmed",
-            detail="no 24H/48H/7D high update",
-        )
-        factor["setup_high"] = setup_high
-        factor["recent_window_bars"] = int(window)
-        return factor
-
-    return make_factor(
-        key="local_high_update",
-        label="Local high update",
-        status="not_enough_data",
-        detail="requires enough 1H candles before setup window",
-    )
-
-
-
 
 # ============================================================
 # RSI DIVERGENCE
@@ -1775,14 +1444,6 @@ def price_high_relation(candidate_high, prior_high, min_hh_pct=None, equal_toler
     return "none"
 
 
-def divergence_relation_label(relation):
-    if relation == "equal_high":
-        return "equal high"
-    if relation == "higher_high":
-        return "bearish"
-    return "bearish"
-
-
 def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
     """
     Detect bearish RSI divergence:
@@ -1872,7 +1533,6 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
         rsi_lower_high = float(candidate_rsi) <= float(prior_rsi) - float(RSI_DIVERGENCE_MIN_RSI_DROP)
 
         if relation in ("higher_high", "equal_high") and rsi_lower_high:
-            label = divergence_relation_label(relation)
             detail = f"{timeframe} RSI bearish" if relation == "higher_high" else f"{timeframe} RSI bearish equal high"
             return {
                 "status": "confirmed",
@@ -1929,8 +1589,6 @@ def detect_rsi_bearish_divergence(df_1h=None, df_4h=None):
 def has_confirmed_rsi_divergence(short_factors):
     factor = get_short_factor(short_factors, "rsi_divergence") or {}
     return bool(factor.get("status") == "confirmed")
-
-
 
 
 def get_oi_divergence_min_swing_distance(timeframe):
@@ -2327,24 +1985,6 @@ def calculate_open_levels_from_daily(df_1d):
     return levels
 
 
-def get_kyiv_period_start(reference_kyiv, period_label):
-    ts = pd.to_datetime(reference_kyiv)
-
-    if period_label == "D":
-        return ts.normalize()
-
-    if period_label == "W":
-        return (ts - pd.Timedelta(days=int(ts.weekday()))).normalize()
-
-    if period_label == "M":
-        return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    if period_label == "Y":
-        return ts.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    return None
-
-
 def calculate_open_levels_from_intraday(df_intraday, source="1H_UTC"):
     """Return D/W/M/Y open levels from intraday candles aligned to UTC starts.
 
@@ -2439,8 +2079,6 @@ def calculate_open_levels(df_1d=None, df_1h=None, df_4h=None):
     }
 
     return levels
-
-
 
 
 def open_level_source_is_allowed_for_signal(label, level):
@@ -2556,7 +2194,6 @@ def event_confirm_time(event):
         return parsed
     except Exception:
         return None
-
 
 
 def timeframe_to_timedelta(timeframe):
@@ -3009,30 +2646,6 @@ def select_best_open_level_event(events):
     return sorted(valid_events, key=open_level_event_rank, reverse=True)[0]
 
 
-def evaluate_open_level_context(label, level_price, current_price, confirm_candle, previous_candle):
-    """Backward-compatible single-candle evaluator used by older tests/helpers."""
-    threshold = OPEN_LEVEL_NEAR_THRESHOLDS.get(label, 0.0035)
-    weights = OPEN_LEVEL_CONTEXT_WEIGHTS.get(label, {"near": 0.0, "tested": 0.0})
-
-    if open_level_tested_from_below(confirm_candle, previous_candle, level_price):
-        return {
-            "label": label,
-            "state": "tested",
-            "weight": float(weights.get("tested", 0.0)),
-            "open": float(level_price),
-        }
-
-    if open_level_near_from_below(current_price, level_price, threshold):
-        return {
-            "label": label,
-            "state": "near",
-            "weight": float(weights.get("near", 0.0)),
-            "open": float(level_price),
-        }
-
-    return None
-
-
 def format_open_level_price_for_telegram(value):
     """Format D/W/M/Y open values for compact Telegram diagnostics.
 
@@ -3334,7 +2947,6 @@ def detect_open_levels_context(df_1h=None, df_4h=None, df_1d=None, current_price
     }
 
     return factor
-
 
 
 def candle_has_upper_rejection(candle):
@@ -3765,7 +3377,6 @@ def detect_rejection_candle(df_1h=None, df_4h=None, df_1d=None, current_price=No
     return factor
 
 
-
 def analyze_short_factors(df_1h, df_4h=None, df_1d=None, current_price=None, oi_history=None, provider="provider"):
     """
     Current simplified short-watch factor set.
@@ -3918,7 +3529,6 @@ def is_factor_confirmed(short_factors, key):
     return bool(factor and factor.get("status") == "confirmed")
 
 
-
 def calculate_location_trigger_context(short_factors):
     """
     Split short analysis into location context and trigger confirmation.
@@ -3933,7 +3543,6 @@ def calculate_location_trigger_context(short_factors):
 
     open_levels = get_short_factor(short_factors, "open_levels") or {}
     liquidity = get_short_factor(short_factors, "liquidity_sweep") or {}
-    rejection = get_short_factor(short_factors, "rejection_candle") or {}
 
     liquidity_confirmed = is_factor_confirmed(short_factors, "liquidity_sweep")
     rejection_confirmed = is_factor_confirmed(short_factors, "rejection_candle")
@@ -4003,25 +3612,6 @@ def calculate_location_trigger_context(short_factors):
         "liquidity_candidate": liquidity_candidate,
         "trigger_parts": trigger_parts,
     }
-
-
-def quality_location_label(score):
-    score = float(safe_float(score, default=0.0))
-
-    if score >= 2:
-        return "Strong open resistance"
-    if score >= 1:
-        return "Open resistance"
-    if score > 0:
-        return "Minor open resistance"
-    return "None"
-
-
-def quality_trigger_label_from_context(context):
-    parts = context.get("trigger_parts", [])
-    if parts:
-        return " + ".join(str(part) for part in parts)
-    return "None"
 
 
 def divergence_summary_for_reason(short_factors):
@@ -4245,15 +3835,6 @@ def evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
     }
 
 
-def row_passes_rsi_entry_filter(row):
-    result = evaluate_rsi_entry_filter(
-        rsi_1h_live=row.get("rsi_1h_live"),
-        rsi_1h_closed=row.get("rsi_1h_closed"),
-        rsi_4h_live=row.get("rsi_4h_live"),
-    )
-    return bool(result.get("passed"))
-
-
 def add_rsi_entry_filter_columns(df):
     if df is None or df.empty:
         return df
@@ -4326,7 +3907,6 @@ def get_signal_rank(signal_level):
     }
 
     return ranks.get(signal_level, 0)
-
 
 
 # ============================================================
@@ -4604,7 +4184,6 @@ def format_oi_line_for_telegram(detail):
         return ""
 
     source = str(detail.get("oi_source", detail.get("exchange", "")) or "")
-    status = str(detail.get("oi_status", "") or "")
     context = str(detail.get("oi_context", "N/A") or "N/A")
     change_1h = detail.get("oi_change_1h_percent")
     change_4h = detail.get("oi_change_4h_percent")
@@ -4708,7 +4287,6 @@ def okx_tickers_to_dataframe(tickers):
         df["timestamp"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
 
     return df
-
 
 
 def okx_get_open_interest(inst_id):
@@ -5271,7 +4849,6 @@ def bitget_volume_change_24h(df_1h):
     return float(((last_24 - prev_24) / prev_24) * 100)
 
 
-
 def bitget_get_open_interest(symbol):
     data = safe_get_json(
         base_url=BITGET_BASE_URL,
@@ -5552,24 +5129,6 @@ def telegram_signal_label(signal_level):
     }
 
     return labels.get(signal_level, signal_level)
-
-
-def telegram_signal_badges(row):
-    badges = []
-
-    chg_24h = parse_float_from_value(row.get("chg_24h_%"))
-    vol_chg = parse_float_from_value(row.get("vol_chg_24h_%"))
-
-    if chg_24h is not None and chg_24h >= 20:
-        badges.append("🚀 Strong pump")
-
-    if vol_chg is not None and vol_chg >= 100:
-        badges.append("🔥 Volume spike")
-
-    if vol_chg is not None and vol_chg < 0:
-        badges.append("⚠️ Volume fading")
-
-    return badges
 
 
 def split_long_message(text, max_length=3900):
@@ -5885,65 +5444,6 @@ def prepare_grouped_output_table(grouped_signals):
 
     return pd.DataFrame(rows)
 
-def grouped_signal_badges(group):
-    """
-    Badges are calculated from the same values that Telegram displays.
-
-    Rule:
-    - if the symbol exists on OKX, Telegram displays OKX values;
-    - otherwise Telegram displays the first available exchange values.
-    """
-
-    badges = []
-
-    detail = group.get("display_detail")
-
-    if not detail:
-        return badges
-
-    chg_24h = parse_float_from_value(detail.get("chg_24h_%"))
-    vol_chg = parse_float_from_value(detail.get("vol_chg_24h_%"))
-
-    if chg_24h is not None and chg_24h >= 20:
-        badges.append("🚀 Strong pump")
-
-    if vol_chg is not None and vol_chg >= 100:
-        badges.append("🔥 Volume spike")
-
-    if vol_chg is not None and vol_chg < 0:
-        badges.append("⚠️ Volume fading")
-
-    return badges
-
-
-def short_factor_line(factor):
-    status = factor.get("status")
-    label = str(factor.get("label", "Unknown factor"))
-    detail = str(factor.get("detail", "")).strip()
-
-    if factor.get("key") == "premium_zone":
-        return format_premium_line_from_factors([factor])["premium_factor_line"]
-
-    if status == "confirmed":
-        icon = "✅"
-    elif status == "candidate":
-        icon = "⚠️"
-    elif status == "not_enough_data":
-        icon = "⚪"
-    else:
-        icon = "❌"
-
-    if detail:
-        return f"{icon} {label} — {detail}"
-
-    return f"{icon} {label}"
-
-
-def format_short_factors_for_telegram(factors):
-    if not factors:
-        return ["⚪ Short factors not available"]
-
-    return [short_factor_line(factor) for factor in factors]
 
 def find_factor(factors, key):
     if not factors:
@@ -5956,115 +5456,6 @@ def find_factor(factors, key):
     return None
 
 
-def format_premium_line_from_factors(factors):
-    factor = find_factor(factors, "premium_zone")
-
-    if not factor:
-        return {
-            "premium_1h": "N/A",
-            "premium_4h": "N/A",
-            "premium_factor_line": "⚪ Premium zone — data unavailable",
-        }
-
-    label_1h = str(factor.get("premium_1h_label", "N/A"))
-    label_4h = str(factor.get("premium_4h_label", "N/A"))
-    position_1h = factor.get("premium_1h_position")
-    position_4h = factor.get("premium_4h_position")
-
-    if position_1h is not None and not pd.isna(position_1h):
-        premium_1h = f"{label_1h} / {float(position_1h):.2f}"
-    else:
-        premium_1h = label_1h
-
-    if position_4h is not None and not pd.isna(position_4h):
-        premium_4h = f"{label_4h} / {float(position_4h):.2f}"
-    else:
-        premium_4h = label_4h
-
-    if factor.get("status") == "confirmed":
-        icon = "✅"
-    elif factor.get("status") == "not_enough_data":
-        icon = "⚪"
-    else:
-        icon = "❌"
-
-    return {
-        "premium_1h": premium_1h,
-        "premium_4h": premium_4h,
-        "premium_factor_line": f"{icon} Premium zone — 1H: {label_1h} | 4H: {label_4h}",
-    }
-
-
-def quality_pump_label(score):
-    score = int(score or 0)
-
-    if score >= 3:
-        return "Extreme"
-    if score == 2:
-        return "Strong"
-    if score == 1:
-        return "Mild"
-    return "None"
-
-
-def quality_heat_label(score):
-    score = int(score or 0)
-
-    if score >= 4:
-        return "Strong"
-    if score >= 2:
-        return "Moderate"
-    if score == 1:
-        return "Mild"
-    return "None"
-
-
-def quality_volume_label(score):
-    score = int(score or 0)
-
-    if score >= 3:
-        return "Strong spike"
-    if score == 2:
-        return "Strong"
-    if score == 1:
-        return "Normal"
-    return "Weak"
-
-
-def quality_priority_label(signal_level):
-    mapping = {
-        "HIGH_PRIORITY_SHORT_WATCH": "Critical",
-        "SHORT_WATCH": "High",
-        "OVERHEAT_WATCH": "Medium",
-        "PUMP_WATCH": "Low",
-        "NO_SIGNAL": "None",
-    }
-
-    return mapping.get(str(signal_level), "None")
-
-
-def build_quality_labels(detail):
-    pump_score = int(detail.get("pump_score", 0))
-    rsi_score = int(detail.get("rsi_score", 0))
-    volume_score = int(detail.get("volume_score", 0))
-    short_factors = detail.get("short_factors", []) or []
-    signal_level = str(detail.get("signal_level", "NO_SIGNAL"))
-
-    context = calculate_location_trigger_context(short_factors)
-
-    return {
-        "pump_quality": quality_pump_label(pump_score),
-        "heat_quality": quality_heat_label(rsi_score),
-        "volume_quality": quality_volume_label(volume_score),
-        "location_quality": quality_location_label(context.get("location_score", 0)),
-        "trigger_quality": quality_trigger_label_from_context(context),
-        "priority_quality": quality_priority_label(signal_level),
-        "setup_status": str(detail.get("setup_status", build_setup_status(signal_level, detail, short_factors))),
-    }
-
-
-
-
 def factor_status_icon(factor):
     status = (factor or {}).get("status")
 
@@ -6073,27 +5464,6 @@ def factor_status_icon(factor):
     if status == "not_enough_data":
         return "⚪"
     return "❌"
-
-
-def compact_factor_summary(factors):
-    """
-    Legacy compact summary helper kept for internal/debug use.
-    Telegram output now uses user-facing factor lines instead.
-    """
-
-    factor_keys = [
-        ("liquidity_sweep", "Sweep"),
-        ("premium_zone", "Prem"),
-        ("local_high_update", "LocalHigh"),
-    ]
-
-    parts = []
-
-    for key, label in factor_keys:
-        factor = find_factor(factors, key) or {}
-        parts.append(f"{factor_status_icon(factor)} {label}")
-
-    return " | ".join(parts)
 
 
 def format_sweep_detail_for_telegram(factors):
@@ -6170,56 +5540,6 @@ def format_divergence_detail_for_telegram(factors):
 
     return " | ".join(parts)
 
-def format_local_high_detail_for_telegram(factors):
-    factor = find_factor(factors, "local_high_update") or {}
-    status = factor.get("status")
-    detail = str(factor.get("detail", "") or "").strip()
-
-    if status == "confirmed":
-        cleaned = detail.replace("1H: ", "").strip()
-        cleaned = cleaned.replace("new ", "")
-
-        # Examples:
-        # "24H high" -> "24H high updated"
-        # "7D high"  -> "7D high updated"
-        if cleaned:
-            return f"{cleaned} updated"
-
-        return "24H/48H/7D high updated"
-
-    if status == "not_enough_data":
-        return "Data unavailable"
-
-    return "no 24H/48H/7D update"
-
-
-def format_premium_value_for_telegram(value):
-    """
-    Convert internal premium labels into compact user-facing Telegram text.
-
-    Examples:
-    - "Premium / 0.75" -> "Premium 0.75"
-    - "Extreme Premium / 0.80" -> "Extreme 0.80"
-    - "Above Range High / 1.05" -> "Above Range 1.05"
-    """
-
-    text = str(value or "N/A").strip()
-
-    if not text or text == "N/A":
-        return "N/A"
-
-    parts = [part.strip() for part in text.split("/")]
-    label = parts[0] if parts else text
-    number = parts[1] if len(parts) > 1 else ""
-
-    label = label.replace("Extreme Premium", "Extreme")
-    label = label.replace("Above Range High", "Above Range")
-
-    if number:
-        return f"{label} {number}"
-
-    return label
-
 
 def format_reason_for_telegram(setup_status):
     text = str(setup_status or "N/A").strip()
@@ -6246,23 +5566,6 @@ def format_reason_for_telegram(setup_status):
     return text[:1].lower() + text[1:] if text else "N/A"
 
 
-def compact_factor_detail(factors, key, default="N/A"):
-    if key == "liquidity_sweep":
-        return format_sweep_detail_for_telegram(factors)
-
-    if key == "local_high_update":
-        return format_local_high_detail_for_telegram(factors)
-
-    factor = find_factor(factors, key) or {}
-    detail = str(factor.get("detail", "") or "").strip()
-
-    if not detail:
-        return default
-
-    return detail
-
-
-
 def format_debug_value(value):
     if value is None:
         return "N/A"
@@ -6278,7 +5581,6 @@ def format_debug_value(value):
         return "N/A"
 
     return "_".join(text.split())
-
 
 
 def log_oi_debug_for_grouped_signals(grouped_signals):
@@ -6372,8 +5674,6 @@ def log_sweep_debug_for_grouped_signals(grouped_signals):
             fields.append(f"detail={format_debug_value(sweep_factor.get('detail'))}")
 
         print(" ".join(fields))
-
-
 
 
 def log_rsi_divergence_debug_for_grouped_signals(grouped_signals):
@@ -6607,38 +5907,6 @@ def log_rejection_debug_for_grouped_signals(grouped_signals):
         print(" ".join(fields))
 
 
-def log_new_high_debug_for_grouped_signals(grouped_signals):
-    """Print NEW_HIGH_DEBUG lines for Telegram-visible signals."""
-
-    visible_levels = {
-        "HIGH_PRIORITY_SHORT_WATCH",
-        "SHORT_WATCH",
-        "OVERHEAT_WATCH",
-    }
-
-    for group in grouped_signals or []:
-        if str(group.get("signal_level")) not in visible_levels:
-            continue
-
-        detail = group.get("display_detail") or {}
-        short_factors = detail.get("short_factors", []) or []
-        factor = find_factor(short_factors, "local_high_update") or {}
-
-        fields = [
-            "NEW_HIGH_DEBUG",
-            f"symbol={format_debug_value(group.get('symbol'))}",
-            f"exchange={format_debug_value(detail.get('exchange'))}",
-            f"signal={format_debug_value(detail.get('signal_level') or group.get('signal_level'))}",
-            f"status={format_debug_value(factor.get('status'))}",
-            f"detail={format_debug_value(factor.get('detail'))}",
-            f"setup_high={format_debug_value(factor.get('setup_high'))}",
-            f"previous_high={format_debug_value(factor.get('previous_high'))}",
-            f"recent_window_bars={format_debug_value(factor.get('recent_window_bars'))}",
-        ]
-
-        print(" ".join(fields))
-
-
 def format_multi_provider_telegram(
     grouped_signals,
     okx_total,
@@ -6837,7 +6105,6 @@ def run_multi_provider_screener():
         send_telegram_message_safe(message)
 
 
-
 # ============================================================
 # SELF TESTS
 # ============================================================
@@ -6961,8 +6228,6 @@ def make_rolling_only_high_take_case():
             rows.append((90.0, 95.0, 89.0, 90.0, 1))
 
     return make_synthetic_ohlcv(rows, freq="1h")
-
-
 
 
 def make_1h_minor_micro_high_sweep_case():
@@ -7114,7 +6379,6 @@ def make_open_levels_4h_far_case():
     return df
 
 
-
 def make_open_levels_4h_recent_window_test_case():
     """4H open was tested one closed candle before the latest closed candle."""
     timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
@@ -7126,7 +6390,6 @@ def make_open_levels_4h_recent_window_test_case():
         "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.2, 98.6, 98.1],
     })
     return df
-
 
 
 def make_open_levels_4h_live_test_case():
@@ -7384,32 +6647,6 @@ def make_classification_sweep_factor():
     )
 
 
-def make_classification_premium_factor(points=0):
-    factor = make_factor(
-        key="premium_zone",
-        label="Premium zone",
-        status="confirmed" if points > 0 else "not_confirmed",
-        points=points,
-        detail="1H: Neutral | 4H: Neutral",
-    )
-    factor["premium_1h_label"] = "Neutral"
-    factor["premium_1h_position"] = 0.50
-    factor["premium_4h_label"] = "Neutral"
-    factor["premium_4h_position"] = 0.50
-    return factor
-
-
-def make_classification_local_high_factor(points=0):
-    return make_factor(
-        key="local_high_update",
-        label="Local high update",
-        status="confirmed" if points > 0 else "not_confirmed",
-        points=points,
-        detail="1H: no 24H/48H/7D high update",
-    )
-
-
-
 def make_classification_rsi_divergence_factor():
     factor = make_factor(
         key="rsi_divergence",
@@ -7451,8 +6688,6 @@ def run_open_levels_classification_self_tests():
             base_scores,
             [
                 make_classification_sweep_factor(),
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "SHORT_WATCH",
@@ -7461,8 +6696,6 @@ def run_open_levels_classification_self_tests():
             "W open tested without sweep cannot create SHORT WATCH",
             base_scores,
             [
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "NO_SIGNAL",
@@ -7472,8 +6705,6 @@ def run_open_levels_classification_self_tests():
             strong_heat_scores,
             [
                 make_classification_sweep_factor(),
-                make_classification_premium_factor(points=0),
-                make_classification_local_high_factor(points=0),
                 make_classification_open_factor(["W"], ["tested"]),
             ],
             "SHORT_WATCH",
@@ -7515,72 +6746,6 @@ def run_open_levels_classification_self_tests():
         raise AssertionError(f"Open levels classification self-tests failed: {failed}/{len(tests)}")
 
     print(f"OPEN LEVELS CLASSIFICATION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
-
-
-def make_local_high_recent_update_case(updated=True):
-    rows = []
-
-    # Build enough 1H candles to validate 24H local-high update over a recent setup window.
-    for i in range(35):
-        confirm = 0 if i == 34 else 1
-        high = 100.0
-        open_price = 95.0
-        low = 94.0
-        close = 96.0
-
-        if i >= 29:
-            high = 98.0
-
-        # Setup candle is not the latest candle. This catches the false-negative
-        # case where the last candle has already pulled back.
-        if updated and i == 31:
-            high = 110.0
-            open_price = 101.0
-            low = 99.0
-            close = 104.0
-
-        rows.append((open_price, high, low, close, confirm))
-
-    return make_synthetic_ohlcv(rows, freq="1h")
-
-
-def run_local_high_self_tests():
-    print("\n" + "=" * 120)
-    print("RUNNING LOCAL HIGH SELF TESTS")
-    print("SCRIPT VERSION:", SCRIPT_VERSION)
-    print("=" * 120)
-
-    tests = [
-        (
-            "recent setup high updated even if latest candle pulled back",
-            detect_local_high_update(make_local_high_recent_update_case(updated=True)),
-            "confirmed",
-            "24H high updated",
-        ),
-        (
-            "recent setup window without new high",
-            detect_local_high_update(make_local_high_recent_update_case(updated=False)),
-            "not_confirmed",
-            "no 24H/48H/7D high update",
-        ),
-    ]
-
-    failed = 0
-
-    for name, result, expected_status, expected_detail in tests:
-        actual_status = str(result.get("status"))
-        detail = str(result.get("detail", ""))
-        ok = actual_status == expected_status and expected_detail in detail
-        status_text = "PASS" if ok else "FAIL"
-        print(f"{status_text} | {name} | expected={expected_status} actual={actual_status} | detail={detail}")
-
-        if not ok:
-            failed += 1
-
-    if failed > 0:
-        raise AssertionError(f"Local high self-tests failed: {failed}/{len(tests)}")
-
-    print(f"LOCAL HIGH SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
 def run_sweep_self_tests():
@@ -7673,9 +6838,6 @@ def run_sweep_self_tests():
     print(f"SWEEP SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
-
-
-
 def make_open_levels_4h_test_without_rejection_case():
     timestamps = pd.date_range("2026-06-10 00:00:00", periods=8, freq="4h")
     df = pd.DataFrame({
@@ -7686,7 +6848,6 @@ def make_open_levels_4h_test_without_rejection_case():
         "close": [94.8, 95.8, 96.8, 97.8, 98.8, 99.4, 100.1, 99.0],
     })
     return df
-
 
 
 def make_open_levels_month_only_1d_case():
@@ -8000,8 +7161,6 @@ def run_rsi_entry_filter_self_tests():
     print(f"RSI ENTRY FILTER SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
-
-
 def run_overheat_context_self_tests():
     print("RUNNING OVERHEAT CONTEXT SELF TESTS")
     print("SCRIPT VERSION:", SCRIPT_VERSION)
@@ -8120,8 +7279,6 @@ def run_open_interest_self_tests():
     print(f"OPEN INTEREST SELF TESTS PASSED: {len(tests)}/{len(tests)}")
 
 
-
-
 def run_rsi_divergence_self_tests():
     print("RUNNING RSI DIVERGENCE SELF TESTS")
 
@@ -8175,7 +7332,6 @@ def run_rsi_divergence_self_tests():
         raise AssertionError(f"RSI divergence self-tests failed: {failed}/{len(tests)}")
 
     print(f"RSI DIVERGENCE SELF TESTS PASSED: {len(tests)}/{len(tests)}")
-
 
 
 def run_oi_divergence_self_tests():
@@ -8257,7 +7413,6 @@ def main():
         run_open_levels_self_tests()
         run_open_levels_classification_self_tests()
         run_rejection_self_tests()
-        run_local_high_self_tests()
         run_rsi_entry_filter_self_tests()
         run_overheat_context_self_tests()
         run_open_interest_self_tests()
