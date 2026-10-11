@@ -29022,5 +29022,2419 @@
    80.979749,
    77.347655
   ]
+ },
+ "rsi_entry/combo/live+|closed+|4h+": {
+  "passed": true,
+  "reason": "1H_live>=65+1H_closed>=65+4H_live>=68"
+ },
+ "rsi_entry/combo/live+|closed+|4h-": {
+  "passed": true,
+  "reason": "1H_live>=65+1H_closed>=65"
+ },
+ "rsi_entry/combo/live+|closed-|4h+": {
+  "passed": true,
+  "reason": "1H_live>=65+4H_live>=68"
+ },
+ "rsi_entry/combo/live+|closed-|4h-": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/combo/live-|closed+|4h+": {
+  "passed": true,
+  "reason": "1H_closed>=65+4H_live>=68"
+ },
+ "rsi_entry/combo/live-|closed+|4h-": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/combo/live-|closed-|4h+": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/combo/live-|closed-|4h-": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/frame": [
+  {
+   "rsi_entry_passed": false,
+   "rsi_entry_reason": "RSI_below_entry_threshold"
+  },
+  {
+   "rsi_entry_passed": true,
+   "rsi_entry_reason": "1H_live>=65"
+  },
+  {
+   "rsi_entry_passed": true,
+   "rsi_entry_reason": "1H_closed>=65"
+  },
+  {
+   "rsi_entry_passed": true,
+   "rsi_entry_reason": "4H_live>=68"
+  }
+ ],
+ "rsi_entry/single/1h_closed=57.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=58.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=60.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=62.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=64.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=64.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=64.9": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_closed=65.0": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=65.1": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=65.5": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=66.0": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=68.0": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=70.0": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=71.5": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_closed=73.0": {
+  "passed": true,
+  "reason": "1H_closed>=65"
+ },
+ "rsi_entry/single/1h_live=57.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=58.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=60.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=62.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=64.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=64.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=64.9": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/1h_live=65.0": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=65.1": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=65.5": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=66.0": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=68.0": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=70.0": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=71.5": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/1h_live=73.0": {
+  "passed": true,
+  "reason": "1H_live>=65"
+ },
+ "rsi_entry/single/4h_live=60.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=61.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=63.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=65.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=67.0": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=67.5": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=67.9": {
+  "passed": false,
+  "reason": "RSI_below_entry_threshold"
+ },
+ "rsi_entry/single/4h_live=68.0": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=68.1": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=68.5": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=69.0": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=71.0": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=73.0": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=74.5": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "rsi_entry/single/4h_live=76.0": {
+  "passed": true,
+  "reason": "4H_live>=68"
+ },
+ "sweep_boundary/age/bars/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   57.64205,
+   27.000463,
+   50.0
+  ]
+ },
+ "sweep_boundary/age/bars/below": {
+  "analysis": {
+   "confirmed_count": 0,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   57.883376,
+   28.266274,
+   50.0
+  ]
+ },
+ "sweep_boundary/base_confirmed": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/break/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish equal high",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/break/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish equal high",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/break/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish equal high",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/break/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish equal high",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/close_back/tight/above": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 5,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "confirmed liquidity sweep",
+   "rsi_score": 1,
+   "setup_status": "Short watch — confirmed liquidity sweep detected",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   67.17984,
+   82.840713,
+   50.0
+  ]
+ },
+ "sweep_boundary/close_back/tight/below": {
+  "analysis": {
+   "confirmed_count": 0,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 1,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   67.087155,
+   82.890427,
+   50.0
+  ]
+ },
+ "sweep_boundary/close_back/wide/above": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 5,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "confirmed liquidity sweep",
+   "rsi_score": 1,
+   "setup_status": "Short watch — confirmed liquidity sweep detected",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   67.447443,
+   82.698276,
+   50.0
+  ]
+ },
+ "sweep_boundary/close_back/wide/below": {
+  "analysis": {
+   "confirmed_count": 0,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 1,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   66.829384,
+   83.02973,
+   50.0
+  ]
+ },
+ "sweep_boundary/equal_high_gap/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H equal highs x2 100.24 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 2,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 2,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 5,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 2,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.707413,
+   24.596074,
+   50.0
+  ]
+ },
+ "sweep_boundary/equal_high_gap/tight/below": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.26 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.707413,
+   24.596074,
+   50.0
+  ]
+ },
+ "sweep_boundary/equal_high_gap/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H equal highs x2 100.20 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 2,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 2,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 5,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 2,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.707413,
+   24.596074,
+   50.0
+  ]
+ },
+ "sweep_boundary/equal_high_gap/wide/below": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.30 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.707413,
+   24.596074,
+   50.0
+  ]
+ },
+ "sweep_boundary/live_invalidation/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   58.420077,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/live_invalidation/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   58.444591,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/live_invalidation/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   58.350462,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/live_invalidation/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   58.513892,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_close_reclaim/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.110568,
+   23.703286,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_close_reclaim/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.104673,
+   23.738448,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_close_reclaim/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.127327,
+   23.603109,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_close_reclaim/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   55.088022,
+   23.837525,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_high_break/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_high_break/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_high_break/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prior_high_break/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prominence/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prominence/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prominence/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/prominence/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/reaction/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/reaction/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/reaction/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/reaction/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   56.056756,
+   17.463676,
+   50.0
+  ]
+ },
+ "sweep_boundary/wick/tight/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   59.112077,
+   28.193332,
+   50.0
+  ]
+ },
+ "sweep_boundary/wick/tight/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   60.278314,
+   31.930052,
+   50.0
+  ]
+ },
+ "sweep_boundary/wick/wide/above": {
+  "analysis": {
+   "confirmed_count": 2,
+   "factors": [
+    {
+     "detail": "1H high 100.00 swept, close below",
+     "key": "liquidity_sweep",
+     "points": 1,
+     "status": "confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 1,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 4,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "liquidity sweep + RSI divergence",
+   "rsi_score": 0,
+   "setup_status": "Short watch — liquidity sweep + RSI divergence",
+   "short_setup_score": 1,
+   "signal_level": "SHORT_WATCH",
+   "trigger_count": 1,
+   "volume_score": 1
+  },
+  "rsi": [
+   58.429327,
+   25.918439,
+   50.0
+  ]
+ },
+ "sweep_boundary/wick/wide/below": {
+  "analysis": {
+   "confirmed_count": 1,
+   "factors": [
+    {
+     "detail": "no confirmed 1H/4H liquidity sweep",
+     "key": "liquidity_sweep",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "no open-level resistance nearby",
+     "key": "open_levels",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "none",
+     "key": "rejection_candle",
+     "points": 0,
+     "status": "not_confirmed"
+    },
+    {
+     "detail": "1H RSI bearish",
+     "key": "rsi_divergence",
+     "points": 0,
+     "status": "confirmed"
+    },
+    {
+     "detail": "OI history unavailable",
+     "key": "oi_divergence",
+     "points": 0,
+     "status": "not_enough_data"
+    }
+   ],
+   "score": 0,
+   "total_count": 5
+  },
+  "classification": {
+   "final_score": 3,
+   "location_score": 0.0,
+   "pump_score": 2,
+   "reason": "Watch filters not passed",
+   "rsi_score": 0,
+   "setup_status": "No watch setup",
+   "short_setup_score": 0,
+   "signal_level": "NO_SIGNAL",
+   "trigger_count": 0,
+   "volume_score": 1
+  },
+  "rsi": [
+   61.432552,
+   35.45437,
+   50.0
+  ]
  }
 }
