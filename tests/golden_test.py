@@ -367,6 +367,259 @@ def collect_factor_sets():
 
 
 # ------------------------------------------------------------
+# Threshold-boundary scenarios: liquidity sweep
+#
+# Every pair differs in ONE input only and sits on both sides of one sweep
+# threshold. "wide" pairs are far from the threshold, "tight" pairs are within
+# about +-5% of it, so that even a +-10% change of the constant flips a result.
+# ------------------------------------------------------------
+
+SWEEP_LEVEL = 100.0
+SWEEP_CANDIDATE_INDEX = 29   # last closed 1H candle; index 30 is the live one
+SWEEP_ROWS = 31
+
+
+def make_sweep_boundary_1h(
+    age_bars=14,
+    prominence=0.01,
+    reaction=0.03,
+    break_pct=0.003,
+    candle=None,
+    live_close_pct=-0.005,
+    prior_close_pct=None,
+    prior_high_pct=None,
+    equal_gap=None,
+):
+    """Single synthetic 1H swing high at 100.0 swept by the last closed candle.
+
+    Defaults produce a confirmed sweep; each argument moves one rule next to
+    its threshold. `candle` is an (open, high, low, close) tuple that overrides
+    the sweep candle. `equal_gap` adds a second, higher swing high that far
+    above the first one (equal-highs tolerance check).
+    """
+    level_index = SWEEP_CANDIDATE_INDEX - int(age_bars)
+    level_prices = {level_index: SWEEP_LEVEL}
+
+    if equal_gap is not None:
+        level_prices[level_index + 6] = SWEEP_LEVEL * (1 + equal_gap)
+
+    rows = [None] * SWEEP_ROWS
+
+    for idx, price in level_prices.items():
+        neighbour_high = price * (1 - prominence)
+        rows[idx] = (98.0, price, 97.0, 98.0, 1)
+
+        for offset in (-2, -1, 1, 2):
+            j = idx + offset
+
+            if rows[j] is not None:
+                continue
+
+            low = price * (1 - reaction) if offset == 1 else 98.9
+            rows[j] = (99.0, neighbour_high, low, 99.0, 1)
+
+    swept_price = max(level_prices.values())
+
+    for i in range(SWEEP_ROWS):
+        if rows[i] is not None:
+            continue
+
+        if i < level_index:
+            rows[i] = (97.5, 98.0, 97.0, 97.5, 1)
+        else:
+            rows[i] = (99.2, 99.5, 99.0, 99.2, 1)
+
+    if candle is None:
+        candle = (99.0, swept_price * (1 + break_pct), 92.0, 95.0)
+
+    rows[SWEEP_CANDIDATE_INDEX] = candle + (1,)
+
+    live_close = SWEEP_LEVEL * (1 + live_close_pct)
+    rows[SWEEP_ROWS - 1] = (99.0, max(99.5, live_close + 0.01), 98.0, live_close, 0)
+
+    # A candle between the level and the sweep that already reclaimed / broke it.
+    if prior_close_pct is not None:
+        close = SWEEP_LEVEL * (1 + prior_close_pct)
+        rows[SWEEP_CANDIDATE_INDEX - 3] = (99.2, close + 0.01, 99.0, close, 1)
+
+    if prior_high_pct is not None:
+        rows[SWEEP_CANDIDATE_INDEX - 3] = (99.2, SWEEP_LEVEL * (1 + prior_high_pct), 99.0, 99.2, 1)
+
+    return make_synthetic_ohlcv_rows(rows)
+
+
+def make_synthetic_ohlcv_rows(rows):
+    return m.make_synthetic_ohlcv(rows, freq="1h")
+
+
+def sweep_wick_candle(wick_share):
+    """Bullish candle (so only the upper wick can mark failure) with a given wick share."""
+    high, low = 100.3, 90.3
+    close = high - wick_share * (high - low)
+    return (94.0, high, low, close)
+
+
+def sweep_close_back_candle(close):
+    """Bearish-body candle closing at `close` after breaking 100.3."""
+    return (99.99, 100.3, 92.0, close)
+
+
+# name -> (below_threshold_kwargs, above_threshold_kwargs); the first side must
+# NOT confirm a sweep and the second must (see SWEEP_PAIR_EXPECTATIONS).
+SWEEP_BOUNDARY_PAIRS = {
+    "break/wide": (dict(break_pct=0.0005), dict(break_pct=0.0015)),
+    "break/tight": (dict(break_pct=0.00095), dict(break_pct=0.00105)),
+    "close_back/wide": (dict(candle=sweep_close_back_candle(99.97)), dict(candle=sweep_close_back_candle(99.93))),
+    "close_back/tight": (dict(candle=sweep_close_back_candle(99.953)), dict(candle=sweep_close_back_candle(99.947))),
+    "wick/wide": (dict(candle=sweep_wick_candle(0.25)), dict(candle=sweep_wick_candle(0.35))),
+    "wick/tight": (dict(candle=sweep_wick_candle(0.28)), dict(candle=sweep_wick_candle(0.32))),
+    "age/bars": (dict(age_bars=4), dict(age_bars=5)),
+    "reaction/wide": (dict(reaction=0.012), dict(reaction=0.018)),
+    "reaction/tight": (dict(reaction=0.014), dict(reaction=0.016)),
+    "prominence/wide": (dict(prominence=0.0015), dict(prominence=0.0025)),
+    "prominence/tight": (dict(prominence=0.0019), dict(prominence=0.0021)),
+    "live_invalidation/wide": (dict(live_close_pct=0.0007), dict(live_close_pct=0.0003)),
+    "live_invalidation/tight": (dict(live_close_pct=0.00053), dict(live_close_pct=0.00047)),
+    "prior_close_reclaim/wide": (dict(prior_close_pct=0.0007), dict(prior_close_pct=0.0003)),
+    "prior_close_reclaim/tight": (dict(prior_close_pct=0.00053), dict(prior_close_pct=0.00047)),
+    "prior_high_break/wide": (dict(prior_high_pct=0.0015), dict(prior_high_pct=0.0005)),
+    "prior_high_break/tight": (dict(prior_high_pct=0.00105), dict(prior_high_pct=0.00095)),
+}
+
+# Equal-highs tolerance: both sides are valid sweeps of valid levels, so the
+# status is the same; what the tolerance decides is the level type (equal
+# highs x2 = 2 points vs a single 1H high = 1 point).
+SWEEP_EQUAL_HIGH_PAIRS = {
+    "equal_high_gap/wide": (dict(equal_gap=0.0030), dict(equal_gap=0.0020)),
+    "equal_high_gap/tight": (dict(equal_gap=0.0026), dict(equal_gap=0.0024)),
+}
+
+
+def sweep_boundary_record(df_1h):
+    price = float(df_1h["close"].iloc[-1])
+    return analyze_and_classify(df_1h, m.make_flat_synthetic_4h(), None, price, None)
+
+
+def build_sweep_boundary_scenarios():
+    scenarios = {}
+    scenarios["sweep_boundary/base_confirmed"] = safe_run(
+        lambda: run_quietly(lambda: sweep_boundary_record(make_sweep_boundary_1h()))
+    )
+
+    for group in (SWEEP_BOUNDARY_PAIRS, SWEEP_EQUAL_HIGH_PAIRS):
+        for name, (low_side, high_side) in group.items():
+            for side, kwargs in (("below", low_side), ("above", high_side)):
+                scenarios[f"sweep_boundary/{name}/{side}"] = safe_run(
+                    lambda kwargs=kwargs: run_quietly(lambda: sweep_boundary_record(make_sweep_boundary_1h(**kwargs)))
+                )
+
+    return scenarios
+
+
+def sweep_factor_of(record):
+    for factor in record.get("analysis", {}).get("factors", []):
+        if factor.get("key") == "liquidity_sweep":
+            return factor
+
+    return {}
+
+
+def check_sweep_pairs(actual):
+    """Each pair must really differ, otherwise the scenario protects nothing."""
+    problems = []
+
+    base = sweep_factor_of(actual.get("sweep_boundary/base_confirmed", {}))
+
+    if base.get("status") != "confirmed":
+        problems.append("sweep_boundary/base_confirmed is not a confirmed sweep")
+
+    for name in SWEEP_BOUNDARY_PAIRS:
+        a = sweep_factor_of(actual.get(f"sweep_boundary/{name}/below", {}))
+        b = sweep_factor_of(actual.get(f"sweep_boundary/{name}/above", {}))
+
+        if a.get("status") != "not_confirmed" or b.get("status") != "confirmed":
+            problems.append(f"sweep pair {name}: expected not_confirmed/confirmed, got {a.get('status')}/{b.get('status')}")
+
+    for name in SWEEP_EQUAL_HIGH_PAIRS:
+        a = sweep_factor_of(actual.get(f"sweep_boundary/{name}/below", {}))
+        b = sweep_factor_of(actual.get(f"sweep_boundary/{name}/above", {}))
+
+        if not (a.get("status") == b.get("status") == "confirmed" and a.get("points") == 1 and b.get("points") == 2):
+            problems.append(f"sweep pair {name}: expected single high (1 pt) / equal highs (2 pts)")
+
+    return problems
+
+
+# ------------------------------------------------------------
+# Threshold-boundary scenarios: RSI entry filter
+# (evaluate_rsi_entry_filter is the function used by add_rsi_entry_filter_columns
+# and by the shortlist; a value of 50 means "clearly below every threshold")
+# ------------------------------------------------------------
+
+RSI_ENTRY_LOW = 50.0
+
+
+def rsi_entry_record(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
+    result = m.evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
+    return {"passed": bool(result["passed"]), "reason": result["reason"]}
+
+
+def build_rsi_entry_scenarios():
+    scenarios = {}
+    thresholds = {"1h_live": 65.0, "1h_closed": 65.0, "4h_live": 68.0}
+
+    # Only one indicator moves; the other two stay far below their thresholds.
+    for name, threshold in thresholds.items():
+        offsets = [-8.0, -6.5, -5.0, -3.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 3.0, 5.0, 6.5, 8.0]
+
+        for offset in offsets:
+            value = round(threshold + offset, 1)
+            args = {"1h_live": RSI_ENTRY_LOW, "1h_closed": RSI_ENTRY_LOW, "4h_live": RSI_ENTRY_LOW}
+            args[name] = value
+            scenarios[f"rsi_entry/single/{name}={value}"] = rsi_entry_record(
+                args["1h_live"], args["1h_closed"], args["4h_live"]
+            )
+
+    # Every combination of "just below" / "just above" for the three thresholds
+    # (exactly one, two, three or none of them passes).
+    for live_up in (False, True):
+        for closed_up in (False, True):
+            for h4_up in (False, True):
+                live = 65.1 if live_up else 64.9
+                closed = 65.1 if closed_up else 64.9
+                h4 = 68.1 if h4_up else 67.9
+                key = f"rsi_entry/combo/live{'+' if live_up else '-'}|closed{'+' if closed_up else '-'}|4h{'+' if h4_up else '-'}"
+                scenarios[key] = rsi_entry_record(live, closed, h4)
+
+    # The same decision through the DataFrame helper used in the working flow.
+    frame = pd.DataFrame([
+        {"rsi_1h_live": 64.9, "rsi_1h_closed": 64.9, "rsi_4h_live": 67.9},
+        {"rsi_1h_live": 65.1, "rsi_1h_closed": 64.9, "rsi_4h_live": 67.9},
+        {"rsi_1h_live": 64.9, "rsi_1h_closed": 65.1, "rsi_4h_live": 67.9},
+        {"rsi_1h_live": 64.9, "rsi_1h_closed": 64.9, "rsi_4h_live": 68.1},
+    ])
+    out = m.add_rsi_entry_filter_columns(frame)
+    scenarios["rsi_entry/frame"] = out[["rsi_entry_passed", "rsi_entry_reason"]].to_dict(orient="records")
+
+    return scenarios
+
+
+def check_rsi_entry(actual):
+    """The three thresholds must be exactly where PROJECT_CONTEXT.md says."""
+    problems = []
+
+    for name, threshold in (("1h_live", 65.0), ("1h_closed", 65.0), ("4h_live", 68.0)):
+        below = actual.get(f"rsi_entry/single/{name}={round(threshold - 0.1, 1)}", {})
+        at = actual.get(f"rsi_entry/single/{name}={threshold}", {})
+        above = actual.get(f"rsi_entry/single/{name}={round(threshold + 0.1, 1)}", {})
+
+        if below.get("passed") is not False or at.get("passed") is not True or above.get("passed") is not True:
+            problems.append(f"rsi entry filter threshold {name}")
+
+    return problems
+
+
+# ------------------------------------------------------------
 # Run / compare
 # ------------------------------------------------------------
 
@@ -375,6 +628,8 @@ def build_results():
     results.update(build_case_scenarios())
     results.update(build_random_scenarios())
     results.update(build_classification_grid(collect_factor_sets()))
+    results.update(build_sweep_boundary_scenarios())
+    results.update(build_rsi_entry_scenarios())
     return clean(results)
 
 
@@ -436,6 +691,14 @@ def check_no_confirm_parity():
 
 def main():
     actual = build_results()
+
+    pair_problems = check_sweep_pairs(actual) + check_rsi_entry(actual)
+
+    if pair_problems:
+        print("GOLDEN TEST: гранична пара не розділяє результат (сценарій марний):")
+        for item in pair_problems:
+            print(" -", item)
+        return 1
 
     if "--update" in sys.argv:
         with open(EXPECTED_PATH, "w", encoding="utf-8") as f:
