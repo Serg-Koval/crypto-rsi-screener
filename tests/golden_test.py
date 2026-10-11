@@ -118,7 +118,7 @@ def analyze_and_classify(df_1h, df_4h, df_1d, price, oi_history, price_change=25
 
     analysis = m.analyze_short_factors(
         df_1h, df_4h, df_1d=df_1d, current_price=price,
-        oi_history=oi_history, provider="OKX",
+        oi_history=oi_history, provider="Bybit",
     )
 
     classification = m.classify_signal(
@@ -340,7 +340,7 @@ def collect_factor_sets():
         df_1h = with_rsi(df_1h)
         return m.analyze_short_factors(
             df_1h, with_rsi(m.make_flat_synthetic_4h()), df_1d=None,
-            current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="OKX",
+            current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="Bybit",
         )["factors"]
 
     def open_levels_factors():
@@ -348,14 +348,14 @@ def collect_factor_sets():
         return m.analyze_short_factors(
             df_1h, with_rsi(m.make_open_levels_4h_test_case()),
             df_1d=m.make_open_levels_1d_case(),
-            current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="OKX",
+            current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="Bybit",
         )["factors"]
 
     def random_factors(seed):
         df_1h, df_4h, df_1d, oi_history = make_random_market(seed)
         return m.analyze_short_factors(
             with_rsi(df_1h), with_rsi(df_4h), df_1d=df_1d,
-            current_price=float(df_1h["close"].iloc[-1]), oi_history=oi_history, provider="OKX",
+            current_price=float(df_1h["close"].iloc[-1]), oi_history=oi_history, provider="Bybit",
         )["factors"]
 
     sets["sweep"] = run_quietly(sweep_factors)
@@ -392,6 +392,48 @@ def diff_results(expected, actual):
     return differences
 
 
+def check_no_confirm_parity():
+    """Bybit candles have no confirm column (last row = live candle).
+
+    The golden scenarios carry confirm=1 for closed candles and confirm=0 for
+    the live one. Dropping the column must not change any factor result.
+    """
+
+    def factors_json(df_1h, df_4h, df_1d, oi_history, strip):
+        frames = [df_1h.copy(), df_4h.copy(), df_1d.copy() if df_1d is not None else None]
+
+        if strip:
+            frames = [f.drop(columns=["confirm"]) if f is not None and "confirm" in f.columns else f for f in frames]
+
+        a = with_rsi(frames[0])
+        b = with_rsi(frames[1])
+        analysis = run_quietly(
+            m.analyze_short_factors, a, b, df_1d=frames[2],
+            current_price=float(a["close"].iloc[-1]), oi_history=oi_history, provider="Bybit",
+        )
+        return json.dumps(clean(summarize_factors(analysis)), sort_keys=True)
+
+    mismatches = []
+
+    for seed in RANDOM_SEEDS:
+        df_1h, df_4h, df_1d, oi_history = make_random_market(seed)
+
+        if factors_json(df_1h, df_4h, df_1d, oi_history, False) != factors_json(df_1h, df_4h, df_1d, oi_history, True):
+            mismatches.append(f"random/seed_{seed}")
+
+    sweep_cases = {
+        "case/1h_equal_high_sweep": (m.make_1h_equal_high_sweep_case(), m.make_flat_synthetic_4h()),
+        "case/4h_swing_sweep": (m.make_flat_synthetic_1h(), m.make_4h_swing_sweep_case(level_age_bars=5)),
+        "case/rolling_only_high_take": (m.make_rolling_only_high_take_case(), m.make_flat_synthetic_4h()),
+    }
+
+    for name, (df_1h, df_4h) in sweep_cases.items():
+        if factors_json(df_1h, df_4h, None, None, False) != factors_json(df_1h, df_4h, None, None, True):
+            mismatches.append(name)
+
+    return mismatches
+
+
 def main():
     actual = build_results()
 
@@ -411,13 +453,19 @@ def main():
 
     differences = diff_results(expected, actual)
 
+    parity_mismatches = check_no_confirm_parity()
+
+    if parity_mismatches:
+        print("GOLDEN TEST: шлях без колонки confirm (Bybit) дає інший результат:", parity_mismatches[:10])
+        return 1
+
     if differences:
         print(f"GOLDEN TEST: ВІДМІННОСТІ ЗНАЙДЕНО ({len(differences)} з {len(expected)} сценаріїв)")
         for item in differences[:20]:
             print(" -", item)
         return 1
 
-    print(f"GOLDEN TEST: без відмінностей ({len(expected)} сценаріїв)")
+    print(f"GOLDEN TEST: без відмінностей ({len(expected)} сценаріїв; шлях без confirm збігається)")
     return 0
 
 
