@@ -20,11 +20,13 @@ Telegram-скринер перегріву і short watch на USDT-перпет
 - GitHub Actions не може звертатися до Bybit API напряму (HTTP 403, геоблок). Тому запити до Bybit мають іти через проксі в Cloudflare Worker (див. `bybit-migration-task-free.md` у документах проєкту). Прямих запитів Python до `api.bybit.com` не додавати.
 
 ## Файли
-- `main.py` — весь аналіз і відправка в Telegram.
-- `.github/workflows/screener.yml` — основний workflow (запускається лише вручну або з Worker).
+- `main.py` — весь аналіз і відправка в Telegram. Джерело даних: Bybit через проксі в Cloudflare Worker (версія `bybit-proxy-v1-20261010-r37`).
+- `.github/workflows/screener.yml` — основний workflow (запускається лише вручну або з Worker). Отримує секрети `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `BYBIT_PROXY_URL`, `BYBIT_PROXY_SECRET`.
 - `tests/golden_test.py` і `tests/golden_expected.json` — «золотий» регресійний тест (`python tests/golden_test.py`), має показувати «без відмінностей». Очікуваний файл перезаписується (`--update`) лише свідомо.
-- `.github/workflows/bybit-test.yml` — допоміжний workflow (які ендпоінти Bybit відповідають з GitHub Actions). Без прямого завдання його не змінювати; видаляється в кінці міграції на Bybit.
-- `README.md` застарів (описує OKX). Оновлюється окремим завданням.
+- `requirements.txt` — закріплені версії бібліотек. Оновлювати лише свідомо, з прогоном обох тестів.
+- `README.md` — опис проєкту для користувача: як працює, секрети, запуск, перевірки.
+- `PROJECT_CONTEXT.md` — повний опис логіки, порогів і поточного стану.
+- Cloudflare Worker (`worker.js`) у репозиторії немає. **Worker має Placement = EU2 (Європа). Не змінювати:** інакше Worker виконується в США, і Bybit дає HTTP 403.
 
 ## Мова коду
 Імена функцій і змінних, коментарі в коді: англійською, як зараз. Повідомлення користувачу, описи PR і пояснення: українською.
