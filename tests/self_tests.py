@@ -12,6 +12,7 @@ from tests.self_tests_factors import (
     run_sweep_self_tests,
 )
 from tests.self_tests_oi import run_open_interest_self_tests
+from tests.self_tests_thresholds import run_threshold_self_tests
 
 
 def run_all():
@@ -25,3 +26,4 @@ def run_all():
     run_rsi_divergence_self_tests()
     run_oi_divergence_self_tests()
     run_bybit_self_tests()
+    run_threshold_self_tests()
