@@ -25,7 +25,15 @@ import pandas as pd
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import main as m  # noqa: E402
+import tests.cases as cases  # noqa: E402
+from screener.classification import (  # noqa: E402
+    add_rsi_entry_filter_columns,
+    classify_signal,
+    evaluate_rsi_entry_filter,
+)
+from screener.common import calculate_rsi  # noqa: E402
+from screener.config import RSI_PERIOD  # noqa: E402
+from screener.factors.analysis import analyze_short_factors  # noqa: E402
 
 EXPECTED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_expected.json")
 RANDOM_SEEDS = list(range(40))
@@ -100,7 +108,7 @@ def safe_run(func):
 def with_rsi(df):
     if df is None:
         return None
-    return m.calculate_rsi(df, period=m.RSI_PERIOD)
+    return calculate_rsi(df, period=RSI_PERIOD)
 
 
 def last_rsi(df, live=True):
@@ -116,12 +124,12 @@ def analyze_and_classify(df_1h, df_4h, df_1d, price, oi_history, price_change=25
     df_1h = with_rsi(df_1h)
     df_4h = with_rsi(df_4h)
 
-    analysis = m.analyze_short_factors(
+    analysis = analyze_short_factors(
         df_1h, df_4h, df_1d=df_1d, current_price=price,
         oi_history=oi_history, provider="Bybit",
     )
 
-    classification = m.classify_signal(
+    classification = classify_signal(
         rsi_1h_live=last_rsi(df_1h, True),
         rsi_1h_closed=last_rsi(df_1h, False),
         rsi_4h_live=last_rsi(df_4h, True),
@@ -159,19 +167,19 @@ def build_case_scenarios():
     scenarios = {}
 
     case_functions = {
-        "4h_swing_sweep_age5": lambda: m.make_4h_swing_sweep_case(level_age_bars=5),
-        "4h_swing_sweep_age4": lambda: m.make_4h_swing_sweep_case(level_age_bars=4),
-        "4h_swing_sweep_age8_no4hconfirm": lambda: m.make_4h_swing_sweep_case(level_age_bars=8, confirm_with_4h=False),
-        "4h_level_without_4h_sweep": m.make_4h_level_without_4h_sweep_case,
-        "1h_intrabar_take_of_4h_level": m.make_1h_intrabar_take_of_4h_level_case,
-        "1h_equal_high_sweep": m.make_1h_equal_high_sweep_case,
-        "rolling_only_high_take": m.make_rolling_only_high_take_case,
-        "1h_minor_micro_high_sweep": m.make_1h_minor_micro_high_sweep_case,
-        "1h_level_with_4h_close_only": m.make_1h_level_with_4h_close_only_case,
+        "4h_swing_sweep_age5": lambda: cases.make_4h_swing_sweep_case(level_age_bars=5),
+        "4h_swing_sweep_age4": lambda: cases.make_4h_swing_sweep_case(level_age_bars=4),
+        "4h_swing_sweep_age8_no4hconfirm": lambda: cases.make_4h_swing_sweep_case(level_age_bars=8, confirm_with_4h=False),
+        "4h_level_without_4h_sweep": cases.make_4h_level_without_4h_sweep_case,
+        "1h_intrabar_take_of_4h_level": cases.make_1h_intrabar_take_of_4h_level_case,
+        "1h_equal_high_sweep": cases.make_1h_equal_high_sweep_case,
+        "rolling_only_high_take": cases.make_rolling_only_high_take_case,
+        "1h_minor_micro_high_sweep": cases.make_1h_minor_micro_high_sweep_case,
+        "1h_level_with_4h_close_only": cases.make_1h_level_with_4h_close_only_case,
     }
 
-    flat_1h = m.make_flat_synthetic_1h()
-    flat_4h = m.make_flat_synthetic_4h()
+    flat_1h = cases.make_flat_synthetic_1h()
+    flat_4h = cases.make_flat_synthetic_4h()
 
     for name, factory in case_functions.items():
         def run(factory=factory):
@@ -190,31 +198,31 @@ def build_case_scenarios():
 
     # Open-level cases: cross product of 1H and 4H helpers with the 1D helper.
     ol_1h = {
-        "1h_confirm": m.make_open_levels_1h_confirm_case,
-        "1h_near_d_rejection": m.make_open_levels_1h_near_d_rejection_case,
-        "1h_htf_rejection": m.make_open_levels_1h_htf_rejection_case,
-        "1h_htf_live_test": m.make_open_levels_1h_htf_live_test_case,
-        "1h_grass": m.make_open_levels_grass_1h_case,
+        "1h_confirm": cases.make_open_levels_1h_confirm_case,
+        "1h_near_d_rejection": cases.make_open_levels_1h_near_d_rejection_case,
+        "1h_htf_rejection": cases.make_open_levels_1h_htf_rejection_case,
+        "1h_htf_live_test": cases.make_open_levels_1h_htf_live_test_case,
+        "1h_grass": cases.make_open_levels_grass_1h_case,
     }
     ol_4h = {
-        "4h_test": m.make_open_levels_4h_test_case,
-        "4h_near": m.make_open_levels_4h_near_case,
-        "4h_far": m.make_open_levels_4h_far_case,
-        "4h_recent_window": m.make_open_levels_4h_recent_window_test_case,
-        "4h_live_test": m.make_open_levels_4h_live_test_case,
-        "4h_test_without_rejection": m.make_open_levels_4h_test_without_rejection_case,
-        "4h_grass": m.make_open_levels_grass_4h_case,
+        "4h_test": cases.make_open_levels_4h_test_case,
+        "4h_near": cases.make_open_levels_4h_near_case,
+        "4h_far": cases.make_open_levels_4h_far_case,
+        "4h_recent_window": cases.make_open_levels_4h_recent_window_test_case,
+        "4h_live_test": cases.make_open_levels_4h_live_test_case,
+        "4h_test_without_rejection": cases.make_open_levels_4h_test_without_rejection_case,
+        "4h_grass": cases.make_open_levels_grass_4h_case,
     }
     ol_1d = {
-        "1d": m.make_open_levels_1d_case,
-        "1d_d_rejected_reclaimed": m.make_open_levels_d_rejected_then_reclaimed_case,
-        "1d_month_only": m.make_open_levels_month_only_1d_case,
-        "1d_far_below_month": m.make_open_levels_far_below_month_case,
-        "1d_month_reclaimed": m.make_open_levels_month_reclaimed_case,
-        "1d_old_month_rejection": m.make_open_levels_old_month_rejection_then_closed_above_case,
-        "1d_useless_like": m.make_open_levels_useless_like_case,
-        "1d_w_reclaimed_m_not_reached": m.make_open_levels_w_reclaimed_m_not_reached_case,
-        "1d_vvv": m.make_open_levels_vvv_1d_case,
+        "1d": cases.make_open_levels_1d_case,
+        "1d_d_rejected_reclaimed": cases.make_open_levels_d_rejected_then_reclaimed_case,
+        "1d_month_only": cases.make_open_levels_month_only_1d_case,
+        "1d_far_below_month": cases.make_open_levels_far_below_month_case,
+        "1d_month_reclaimed": cases.make_open_levels_month_reclaimed_case,
+        "1d_old_month_rejection": cases.make_open_levels_old_month_rejection_then_closed_above_case,
+        "1d_useless_like": cases.make_open_levels_useless_like_case,
+        "1d_w_reclaimed_m_not_reached": cases.make_open_levels_w_reclaimed_m_not_reached_case,
+        "1d_vvv": cases.make_open_levels_vvv_1d_case,
     }
 
     for n1, f1 in ol_1h.items():
@@ -316,7 +324,7 @@ def build_classification_grid(factor_sets):
                                 f"grid/{set_name}|1h{rsi_1h_live}|c{rsi_1h_closed}|"
                                 f"4h{rsi_4h_live}|p{price_change}|v{volume_change}"
                             )
-                            result = m.classify_signal(
+                            result = classify_signal(
                                 rsi_1h_live=rsi_1h_live,
                                 rsi_1h_closed=rsi_1h_closed,
                                 rsi_4h_live=rsi_4h_live,
@@ -336,24 +344,24 @@ def collect_factor_sets():
     sets = {"empty": []}
 
     def sweep_factors():
-        df_1h = m.make_1h_equal_high_sweep_case()
+        df_1h = cases.make_1h_equal_high_sweep_case()
         df_1h = with_rsi(df_1h)
-        return m.analyze_short_factors(
-            df_1h, with_rsi(m.make_flat_synthetic_4h()), df_1d=None,
+        return analyze_short_factors(
+            df_1h, with_rsi(cases.make_flat_synthetic_4h()), df_1d=None,
             current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="Bybit",
         )["factors"]
 
     def open_levels_factors():
-        df_1h = with_rsi(m.make_open_levels_1h_htf_rejection_case())
-        return m.analyze_short_factors(
-            df_1h, with_rsi(m.make_open_levels_4h_test_case()),
-            df_1d=m.make_open_levels_1d_case(),
+        df_1h = with_rsi(cases.make_open_levels_1h_htf_rejection_case())
+        return analyze_short_factors(
+            df_1h, with_rsi(cases.make_open_levels_4h_test_case()),
+            df_1d=cases.make_open_levels_1d_case(),
             current_price=float(df_1h["close"].iloc[-1]), oi_history=None, provider="Bybit",
         )["factors"]
 
     def random_factors(seed):
         df_1h, df_4h, df_1d, oi_history = make_random_market(seed)
-        return m.analyze_short_factors(
+        return analyze_short_factors(
             with_rsi(df_1h), with_rsi(df_4h), df_1d=df_1d,
             current_price=float(df_1h["close"].iloc[-1]), oi_history=oi_history, provider="Bybit",
         )["factors"]
@@ -449,7 +457,7 @@ def make_sweep_boundary_1h(
 
 
 def make_synthetic_ohlcv_rows(rows):
-    return m.make_synthetic_ohlcv(rows, freq="1h")
+    return cases.make_synthetic_ohlcv(rows, freq="1h")
 
 
 def sweep_wick_candle(wick_share):
@@ -497,7 +505,7 @@ SWEEP_EQUAL_HIGH_PAIRS = {
 
 def sweep_boundary_record(df_1h):
     price = float(df_1h["close"].iloc[-1])
-    return analyze_and_classify(df_1h, m.make_flat_synthetic_4h(), None, price, None)
+    return analyze_and_classify(df_1h, cases.make_flat_synthetic_4h(), None, price, None)
 
 
 def build_sweep_boundary_scenarios():
@@ -560,7 +568,7 @@ RSI_ENTRY_LOW = 50.0
 
 
 def rsi_entry_record(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
-    result = m.evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
+    result = evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
     return {"passed": bool(result["passed"]), "reason": result["reason"]}
 
 
@@ -598,7 +606,7 @@ def build_rsi_entry_scenarios():
         {"rsi_1h_live": 64.9, "rsi_1h_closed": 65.1, "rsi_4h_live": 67.9},
         {"rsi_1h_live": 64.9, "rsi_1h_closed": 64.9, "rsi_4h_live": 68.1},
     ])
-    out = m.add_rsi_entry_filter_columns(frame)
+    out = add_rsi_entry_filter_columns(frame)
     scenarios["rsi_entry/frame"] = out[["rsi_entry_passed", "rsi_entry_reason"]].to_dict(orient="records")
 
     return scenarios
@@ -663,7 +671,7 @@ def check_no_confirm_parity():
         a = with_rsi(frames[0])
         b = with_rsi(frames[1])
         analysis = run_quietly(
-            m.analyze_short_factors, a, b, df_1d=frames[2],
+            analyze_short_factors, a, b, df_1d=frames[2],
             current_price=float(a["close"].iloc[-1]), oi_history=oi_history, provider="Bybit",
         )
         return json.dumps(clean(summarize_factors(analysis)), sort_keys=True)
@@ -677,9 +685,9 @@ def check_no_confirm_parity():
             mismatches.append(f"random/seed_{seed}")
 
     sweep_cases = {
-        "case/1h_equal_high_sweep": (m.make_1h_equal_high_sweep_case(), m.make_flat_synthetic_4h()),
-        "case/4h_swing_sweep": (m.make_flat_synthetic_1h(), m.make_4h_swing_sweep_case(level_age_bars=5)),
-        "case/rolling_only_high_take": (m.make_rolling_only_high_take_case(), m.make_flat_synthetic_4h()),
+        "case/1h_equal_high_sweep": (cases.make_1h_equal_high_sweep_case(), cases.make_flat_synthetic_4h()),
+        "case/4h_swing_sweep": (cases.make_flat_synthetic_1h(), cases.make_4h_swing_sweep_case(level_age_bars=5)),
+        "case/rolling_only_high_take": (cases.make_rolling_only_high_take_case(), cases.make_flat_synthetic_4h()),
     }
 
     for name, (df_1h, df_4h) in sweep_cases.items():
