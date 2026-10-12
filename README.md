@@ -70,7 +70,7 @@ python main.py --self-test      # самотести (усі мають прох
 python tests/golden_test.py     # «золотий» регресійний тест: має показати «без відмінностей»
 ```
 
-Золотий тест фіксує результати аналізу на 1084 сценаріях. Його очікуваний файл (`tests/golden_expected.json`) перезаписується (`--update`) лише свідомо, коли змінюється логіка аналізу.
+Золотий тест фіксує результати аналізу на 1177 сценаріях. Його очікуваний файл (`tests/golden_expected.json`) перезаписується (`--update`) лише свідомо, коли змінюється логіка аналізу.
 
 Залежності закріплені в `requirements.txt` (Python 3.11).
 
@@ -78,9 +78,24 @@ python tests/golden_test.py     # «золотий» регресійний те
 
 | Файл | Призначення |
 |---|---|
-| `main.py` | увесь аналіз і відправка в Telegram |
+| `main.py` | лише точка входу: `python main.py` запускає скринер, `python main.py --self-test` самотести |
+| `screener/config.py` | усі константи й пороги, `SCRIPT_VERSION` |
+| `screener/common.py` | HTTP-сесія, RSI, форматування, допоміжні функції для свічок і факторів |
+| `screener/oi_context.py` | історія й метрики Open Interest, підписи OI-контексту |
+| `screener/factors/sweep.py` | фактор liquidity sweep |
+| `screener/factors/divergence.py` | RSI- і OI-дивергенції |
+| `screener/factors/open_levels.py` | рівні відкриття D/W/M/Y і їхній контекст |
+| `screener/factors/rejection.py` | фактор rejection candle |
+| `screener/factors/analysis.py` | збирає п'ять факторів в один результат (`analyze_short_factors`) |
+| `screener/classification.py` | оцінки, дерево класифікації, RSI-фільтр входу, ранги сигналів |
+| `screener/bybit.py` | запити до Bybit через проксі, universe, prefilter, аналіз кандидата |
+| `screener/telegram.py` | облікові дані Telegram, розбиття довгих повідомлень, відправка |
+| `screener/report.py` | таблиці сигналів, текст Telegram-звіту, діагностичні логи |
+| `screener/runner.py` | `run_screener` і контроль повноти даних |
 | `.github/workflows/screener.yml` | workflow запуску скринера |
 | `requirements.txt` | закріплені версії бібліотек |
+| `tests/cases.py` | синтетичні свічки й фактори для тестів (`make_*`) |
+| `tests/self_tests.py`, `tests/self_tests_*.py` | самотести; `run_all()` запускає їх усі |
 | `tests/golden_test.py`, `tests/golden_expected.json` | «золотий» регресійний тест |
 | `CLAUDE.md` | правила роботи Claude Code в проєкті |
 | `PROJECT_CONTEXT.md` | повний опис логіки, порогів і поточного стану |
