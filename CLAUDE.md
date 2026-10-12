@@ -11,7 +11,7 @@ Telegram-скринер перегріву і short watch на USDT-перпет
 3. **Малі кроки.** Змінюй код невеликими перевірюваними частинами. Після кожної частини напиши, що змінено і як це перевірити.
 4. **Перед PR запускай `python main.py --self-test`.** Усі тести мають проходити. У PR напиши результат.
 5. **Не чіпай секрети.** Токени й ключі (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GITHUB_TOKEN`, секрети проксі) не вписуються в код, логи чи коміти. Вони лише в GitHub Secrets і секретах Cloudflare.
-6. **Оновлюй `SCRIPT_VERSION`** у `main.py`, коли змінюється поведінка, і додавай нову версію в опис PR.
+6. **Оновлюй `SCRIPT_VERSION`** у `screener/config.py`, коли змінюється поведінка, і додавай нову версію в опис PR.
 7. Якщо чогось не вистачає для завдання або воно суперечить цим правилам, зупинись і запитай користувача, а не вгадуй.
 
 ## Архітектура коротко
@@ -20,7 +20,9 @@ Telegram-скринер перегріву і short watch на USDT-перпет
 - GitHub Actions не може звертатися до Bybit API напряму (HTTP 403, геоблок). Тому запити до Bybit мають іти через проксі в Cloudflare Worker (див. `bybit-migration-task-free.md` у документах проєкту). Прямих запитів Python до `api.bybit.com` не додавати.
 
 ## Файли
-- `main.py` — весь аналіз і відправка в Telegram. Джерело даних: Bybit через проксі в Cloudflare Worker (версія `bybit-proxy-v1-20261010-r37`).
+- `main.py` — лише точка входу (`python main.py`, `python main.py --self-test`). Уся логіка живе в пакеті `screener/`. Джерело даних: Bybit через проксі в Cloudflare Worker (поточну версію див. `SCRIPT_VERSION` у `screener/config.py`).
+- `screener/` — пакет з логікою: `config.py` (константи, пороги, `SCRIPT_VERSION`), `common.py` (сесія, RSI, форматування, допоміжні), `oi_context.py` (Open Interest), `factors/` (`sweep`, `divergence`, `open_levels`, `rejection`, `analysis`), `classification.py` (оцінки, дерево рішень, RSI-фільтр), `bybit.py` (дані біржі через проксі), `telegram.py` (відправка), `report.py` (текст звіту й діагностичні логи), `runner.py` (`run_screener`, контроль повноти даних). Модулі не імпортують `main`. Карту залежностей див. у `PROJECT_CONTEXT.md`.
+- `tests/` — `cases.py` (синтетичні сценарії `make_*`), `self_tests.py` і `self_tests_*.py` (самотести; `python main.py --self-test` викликає `run_all()`), `golden_test.py`.
 - `.github/workflows/screener.yml` — основний workflow (запускається лише вручну або з Worker). Отримує секрети `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `BYBIT_PROXY_URL`, `BYBIT_PROXY_SECRET`.
 - `tests/golden_test.py` і `tests/golden_expected.json` — «золотий» регресійний тест (`python tests/golden_test.py`), має показувати «без відмінностей». Очікуваний файл перезаписується (`--update`) лише свідомо.
 - `requirements.txt` — закріплені версії бібліотек. Оновлювати лише свідомо, з прогоном обох тестів.
