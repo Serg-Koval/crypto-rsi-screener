@@ -3,6 +3,9 @@ name: Ladovka RSI Screener
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ladovka-screener
   cancel-in-progress: false
