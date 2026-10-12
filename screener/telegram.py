@@ -22,6 +22,22 @@ def get_telegram_credentials():
     return bot_token, chat_id
 
 
+def redact_telegram_token(text):
+    """Hide the bot token in text that goes to logs.
+
+    GitHub masks only the exact secret value, but exception messages from
+    requests contain the full request URL (/bot<token>/sendMessage).
+    """
+
+    text = str(text)
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+
+    if not token:
+        return text
+
+    return text.replace(f"bot{token}", "***").replace(token, "***")
+
+
 def telegram_signal_label(signal_level):
     labels = {
         "HIGH_PRIORITY_SHORT_WATCH": "🔴 HIGH PRIORITY SHORT WATCH",
@@ -86,7 +102,7 @@ def send_telegram_message(text):
         except requests.exceptions.RequestException as e:
             print(
                 "Telegram sendMessage failed (non-fatal): "
-                f"attempt={attempt}/{TELEGRAM_SEND_MAX_ATTEMPTS} error={repr(e)}"
+                f"attempt={attempt}/{TELEGRAM_SEND_MAX_ATTEMPTS} error={redact_telegram_token(repr(e))}"
             )
             if attempt < int(TELEGRAM_SEND_MAX_ATTEMPTS):
                 time.sleep(float(TELEGRAM_SEND_RETRY_SLEEP_SECONDS))
@@ -98,7 +114,7 @@ def send_telegram_message(text):
             return True
 
         print("Telegram error response (non-fatal):")
-        print(response.text[:1000])
+        print(redact_telegram_token(response.text[:1000]))
 
         if attempt < int(TELEGRAM_SEND_MAX_ATTEMPTS):
             time.sleep(float(TELEGRAM_SEND_RETRY_SLEEP_SECONDS))
