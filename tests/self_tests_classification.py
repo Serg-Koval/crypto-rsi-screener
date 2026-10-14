@@ -1,5 +1,8 @@
+from screener.common import make_factor
 from screener.config import SCRIPT_VERSION
 from screener.classification import (
+    calculate_scores,
+    classify_signal,
     classify_watch_signal,
     detect_overheat_watch_context,
     evaluate_rsi_entry_filter,
@@ -28,17 +31,22 @@ def run_open_levels_classification_self_tests():
         "has_strong_pump_context": True,
         "has_extreme_pump_context": False,
         "has_overheat_context": False,
+        "has_rsi_heat": False,
         "overheat_reason": "N/A",
     }
 
+    # RSI heat without the full overheat context (e.g. 24h growth < 15%).
+    heat_scores = {**base_scores, "has_rsi_heat": True}
+
     strong_heat_scores = dict(base_scores)
+    strong_heat_scores["has_rsi_heat"] = True
     strong_heat_scores["rsi_score"] = 3
     strong_heat_scores["final_score"] = 8
 
     tests = [
         (
             "W open tested + sweep can provide location and create SHORT WATCH",
-            base_scores,
+            heat_scores,
             [
                 make_classification_sweep_factor(),
                 make_classification_open_factor(["W"], ["tested"]),
@@ -74,11 +82,35 @@ def run_open_levels_classification_self_tests():
         ),
         (
             "Confirmed sweep remains SHORT WATCH even with minor D near context",
-            base_scores,
+            heat_scores,
             [
                 make_classification_sweep_factor(),
                 make_classification_open_factor(["D"], ["near"]),
             ],
+            "SHORT_WATCH",
+        ),
+        (
+            "Sweep without RSI heat is NO_SIGNAL",
+            base_scores,
+            [make_classification_sweep_factor()],
+            "NO_SIGNAL",
+        ),
+        (
+            "Rejection without RSI heat is NO_SIGNAL",
+            base_scores,
+            [make_classification_rejection_factor()],
+            "NO_SIGNAL",
+        ),
+        (
+            "Sweep + RSI heat without overheat context is SHORT WATCH",
+            heat_scores,
+            [make_classification_sweep_factor()],
+            "SHORT_WATCH",
+        ),
+        (
+            "Rejection + RSI heat without overheat context is SHORT WATCH",
+            heat_scores,
+            [make_classification_rejection_factor()],
             "SHORT_WATCH",
         ),
     ]
@@ -99,6 +131,57 @@ def run_open_levels_classification_self_tests():
         raise AssertionError(f"Open levels classification self-tests failed: {failed}/{len(tests)}")
 
     print(f"OPEN LEVELS CLASSIFICATION SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
+def make_classification_rejection_factor():
+    return make_factor(
+        key="rejection_candle",
+        label="Rejection candle",
+        status="confirmed",
+        points=2,
+        detail="1H rejection at D open",
+    )
+
+
+def run_rsi_heat_gate_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING RSI HEAT GATE SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    # (name, 1H live, 1H closed, 4H live, expected has_rsi_heat). Growth stays
+    # below 15% so only the RSI part of the heat context is exercised.
+    cases = [
+        ("1H live 82 + closed 80 -> heat", 82.0, 80.0, 50.0, True),
+        ("1H live 81.99 -> no heat", 81.99, 80.0, 50.0, False),
+        ("1H live 82 + closed 79.99 -> no heat (both required)", 82.0, 79.99, 50.0, False),
+        ("4H live 80 -> heat", 50.0, 50.0, 80.0, True),
+        ("4H live 79.99 -> no heat", 50.0, 50.0, 79.99, False),
+    ]
+
+    failed = 0
+
+    for name, live, closed, live_4h, expected_heat in cases:
+        scores = calculate_scores(live, closed, live_4h, 10_000_000, 0, 10.0, 2)
+        result = classify_signal(
+            live, closed, live_4h, 10_000_000, 0, 10.0,
+            short_factors=[make_classification_sweep_factor()],
+        )
+        expected_signal = "SHORT_WATCH" if expected_heat else "NO_SIGNAL"
+        ok = (
+            scores["has_rsi_heat"] is expected_heat
+            and scores["has_overheat_context"] is False
+            and result["signal_level"] == expected_signal
+        )
+        print(f"{'PASS' if ok else 'FAIL'} | {name} | has_rsi_heat={scores['has_rsi_heat']} signal={result['signal_level']}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"RSI heat gate self-tests failed: {failed}/{len(cases)}")
+
+    print(f"RSI HEAT GATE SELF TESTS PASSED: {len(cases)}/{len(cases)}")
 
 
 def run_rsi_entry_filter_self_tests():

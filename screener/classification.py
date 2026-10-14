@@ -186,6 +186,7 @@ def calculate_scores(
         "has_strong_pump_context": bool(has_strong_pump_context),
         "has_extreme_pump_context": bool(has_extreme_pump_context),
         "has_overheat_context": bool(overheat_context["is_overheat"]),
+        "has_rsi_heat": bool(overheat_context["has_1h_heat"] or overheat_context["has_4h_heat"]),
         "overheat_reason": str(overheat_context["reason"]),
     }
 
@@ -386,7 +387,8 @@ def classify_watch_signal(scores, short_factors=None):
     r33 classification.
 
     - 🟡 OVERHEAT WATCH: pump + RSI heat, no divergence/trigger.
-    - 🟠 SHORT WATCH: sweep/rejection OR pump + RSI heat + RSI/OI divergence.
+    - 🟠 SHORT WATCH: sweep/rejection + RSI heat (trigger alone is not enough;
+      it needs RSI heat) OR pump + RSI heat + RSI/OI divergence.
     - 🔴 HIGH PRIORITY: pump + RSI heat + RSI/OI divergence + sweep/rejection.
 
     All statuses remain watchlist statuses, not entry signals.
@@ -401,13 +403,15 @@ def classify_watch_signal(scores, short_factors=None):
     htf_open_context_score = float(context.get("htf_open_context_score", 0.0))
 
     has_overheat_context = bool(scores.get("has_overheat_context", False))
+    has_rsi_heat = bool(scores.get("has_rsi_heat", False))
     has_trigger = trigger_count >= 1
     has_divergence = has_any_bearish_divergence(short_factors)
 
     # Main decision tree agreed in r33.
     if has_overheat_context and has_divergence and has_trigger:
         signal_level = "HIGH_PRIORITY_SHORT_WATCH"
-    elif has_trigger:
+    elif has_trigger and has_rsi_heat:
+        # Trigger alone is not enough; it needs RSI heat.
         signal_level = "SHORT_WATCH"
     elif has_overheat_context and has_divergence:
         signal_level = "SHORT_WATCH"
