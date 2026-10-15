@@ -11,6 +11,7 @@ from screener.common import (
 from screener.config import (
     BYBIT_CATEGORY,
     BYBIT_CONTRACT_TYPE,
+    BYBIT_CRYPTO_SYMBOL_TYPE,
     BYBIT_INTERVALS,
     BYBIT_OI_HISTORY_LIMIT,
     BYBIT_OI_INTERVAL,
@@ -178,6 +179,12 @@ def bybit_instruments_to_dataframe(instruments):
         & (df["quoteCoin"] == BYBIT_QUOTE_COIN)
         & (df["status"] == BYBIT_STATUS)
     ].copy()
+
+    if "symbolType" in df.columns:
+        symbol_type = df["symbolType"].fillna("").astype(str).str.strip()
+        df = df[symbol_type == BYBIT_CRYPTO_SYMBOL_TYPE].copy()
+    else:
+        print("WARNING: Bybit instruments response has no symbolType column; TradFi filter skipped.")
 
     df["symbol"] = df["symbol"].astype(str)
 

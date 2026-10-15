@@ -346,3 +346,102 @@ def run_bybit_self_tests():
         raise AssertionError(f"Bybit self-tests failed: {failed}/{len(tests)}")
 
     print(f"BYBIT SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
+def run_tradfi_filter_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING TRADFI FILTER SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    import contextlib
+    import io
+    import screener.bybit as bybit_module
+
+    def inst(symbol, symbol_type="", **overrides):
+        row = {"symbol": symbol, "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Trading"}
+        if symbol_type is not None:
+            row["symbolType"] = symbol_type
+        row.update(overrides)
+        return row
+
+    def convert(instruments):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            df = bybit_instruments_to_dataframe(instruments)
+        return df, buffer.getvalue()
+
+    def kept(instruments):
+        df, _ = convert(instruments)
+        return sorted(df["symbol"].tolist())
+
+    row_missing_key = inst("MISSINGUSDT", symbol_type=None)  # column exists elsewhere, key absent here
+    row_null = inst("NULLUSDT", symbol_type=None)
+    row_null["symbolType"] = None
+
+    mixed = [
+        inst("BTCUSDT", ""),
+        inst("SOXSUSDT", "ETF"),
+        inst("BSPUSDT", "stock"),
+        inst("XAUUSDT", "commodity"),
+        inst("NEWUSDT", "index"),
+        row_missing_key,
+        row_null,
+        inst("SPACEUSDT", "  "),
+        inst("TRADFICLOSEDUSDT", "stock", status="Closed"),
+        inst("CRYPTOFUTURESUSDT", "", contractType="LinearFutures"),
+    ]
+
+    # No symbolType column at all (API change): nothing is dropped by type, one warning line.
+    no_column = [
+        {"symbol": "AAAUSDT", "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Trading"},
+        {"symbol": "BBBUSDT", "contractType": "LinearPerpetual", "quoteCoin": "USDT", "status": "Trading"},
+    ]
+    df_no_column, log_no_column = convert(no_column)
+    warning = "WARNING: Bybit instruments response has no symbolType column; TradFi filter skipped."
+    _, log_with_column = convert(mixed)
+
+    # End to end: same numbers for a TradFi and a crypto symbol.
+    instruments = [inst("TRADFIUSDT", "stock"), inst("CRYPTOUSDT", "")]
+    tickers = [
+        {"symbol": "TRADFIUSDT", "lastPrice": "10", "price24hPcnt": "0.30", "turnover24h": "90000000"},
+        {"symbol": "CRYPTOUSDT", "lastPrice": "10", "price24hPcnt": "0.30", "turnover24h": "90000000"},
+    ]
+    saved = (bybit_module.bybit_get_instruments, bybit_module.bybit_get_tickers)
+    bybit_module.bybit_get_instruments = lambda: instruments
+    bybit_module.bybit_get_tickers = lambda: tickers
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            df_universe = bybit_build_market_universe()
+            df_pre = bybit_prefilter_candidates(df_universe)
+    finally:
+        bybit_module.bybit_get_instruments, bybit_module.bybit_get_tickers = saved
+
+    tests = [
+        ("empty symbolType is kept", "BTCUSDT" in kept(mixed)),
+        ("stock / ETF / commodity / new type are dropped",
+            not {"SOXSUSDT", "BSPUSDT", "XAUUSDT", "NEWUSDT"} & set(kept(mixed))),
+        ("null or missing symbolType in a row (column present) is kept as crypto",
+            {"MISSINGUSDT", "NULLUSDT"} <= set(kept(mixed))),
+        ("whitespace-only symbolType is kept", "SPACEUSDT" in kept(mixed)),
+        ("TradFi with status Closed is dropped", "TRADFICLOSEDUSDT" not in kept(mixed)),
+        ("crypto symbolType but LinearFutures is dropped", "CRYPTOFUTURESUSDT" not in kept(mixed)),
+        ("exact kept set", kept(mixed) == ["BTCUSDT", "MISSINGUSDT", "NULLUSDT", "SPACEUSDT"]),
+        ("no warning when the column exists", warning not in log_with_column),
+        ("no symbolType column: nothing dropped, no exception", df_no_column["symbol"].tolist() == ["AAAUSDT", "BBBUSDT"]),
+        ("no symbolType column: exactly one warning line", log_no_column.count(warning) == 1 and log_no_column.strip() == warning),
+        ("empty instruments still returns an empty frame", convert([])[0].empty),
+        ("universe: TradFi symbol is not in df_universe", df_universe["symbol"].tolist() == ["CRYPTOUSDT"]),
+        ("prefilter: TradFi symbol is not a candidate, crypto is", df_pre["symbol"].tolist() == ["CRYPTOUSDT"]),
+    ]
+
+    failed = 0
+    for name, passed in tests:
+        print(f"{'PASS' if passed else 'FAIL'} | {name}")
+        if not passed:
+            failed += 1
+
+    if failed:
+        raise AssertionError(f"TradFi filter self-tests failed: {failed}/{len(tests)}")
+
+    print(f"TRADFI FILTER SELF TESTS PASSED: {len(tests)}/{len(tests)}")
