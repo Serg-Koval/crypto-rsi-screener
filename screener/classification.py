@@ -1,7 +1,6 @@
 import pandas as pd
 
 from screener.common import (
-    format_debug_value,
     format_large_number,
     get_short_factor,
     safe_float,
@@ -18,9 +17,6 @@ from screener.config import (
     OVERHEAT_WATCH_RSI_4H_LIVE,
     PUMP_WATCH_PRICE_CHANGE_24H,
     RSI_1H_CLOSED_CONFIRMATION,
-    RSI_ENTRY_MIN_1H_CLOSED,
-    RSI_ENTRY_MIN_1H_LIVE,
-    RSI_ENTRY_MIN_4H_LIVE,
 )
 from screener.factors.divergence import (
     has_any_bearish_divergence,
@@ -468,103 +464,6 @@ def classify_signal(
     classification.update(scores)
 
     return classification
-
-
-def evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
-    """
-    Decide whether a signal is hot enough to enter the Telegram short-list.
-
-    This is a visibility filter for the shortlist. It does not change the
-    underlying signal classification, but weak-RSI SHORT WATCH candidates are
-    hidden from Telegram and grouped output.
-    """
-
-    live_1h = safe_float(rsi_1h_live, default=0.0)
-    closed_1h = safe_float(rsi_1h_closed, default=0.0)
-    live_4h = safe_float(rsi_4h_live, default=0.0)
-
-    conditions = []
-
-    if live_1h >= RSI_ENTRY_MIN_1H_LIVE:
-        conditions.append(f"1H_live>={RSI_ENTRY_MIN_1H_LIVE}")
-
-    if closed_1h >= RSI_ENTRY_MIN_1H_CLOSED:
-        conditions.append(f"1H_closed>={RSI_ENTRY_MIN_1H_CLOSED}")
-
-    if live_4h >= RSI_ENTRY_MIN_4H_LIVE:
-        conditions.append(f"4H_live>={RSI_ENTRY_MIN_4H_LIVE}")
-
-    passed = bool(conditions)
-
-    return {
-        "passed": passed,
-        "reason": "+".join(conditions) if conditions else "RSI_below_entry_threshold",
-        "rsi_1h_live": live_1h,
-        "rsi_1h_closed": closed_1h,
-        "rsi_4h_live": live_4h,
-    }
-
-
-def add_rsi_entry_filter_columns(df):
-    if df is None or df.empty:
-        return df
-
-    work_df = df.copy()
-    results = work_df.apply(
-        lambda row: evaluate_rsi_entry_filter(
-            rsi_1h_live=row.get("rsi_1h_live"),
-            rsi_1h_closed=row.get("rsi_1h_closed"),
-            rsi_4h_live=row.get("rsi_4h_live"),
-        ),
-        axis=1,
-    )
-
-    work_df["rsi_entry_passed"] = results.apply(lambda item: bool(item.get("passed")))
-    work_df["rsi_entry_reason"] = results.apply(lambda item: str(item.get("reason", "N/A")))
-
-    return work_df
-
-
-def log_rsi_entry_debug(df):
-    """Print RSI_ENTRY_DEBUG lines for active candidates before shortlist filtering."""
-
-    if df is None or df.empty:
-        return
-
-    if "signal_level" not in df.columns:
-        return
-
-    visible_levels = {
-        "HIGH_PRIORITY_SHORT_WATCH",
-        "SHORT_WATCH",
-        "OVERHEAT_WATCH",
-    }
-
-    for _, row in df.iterrows():
-        signal_level = str(row.get("signal_level", "NO_SIGNAL"))
-        if signal_level not in visible_levels:
-            continue
-
-        result = evaluate_rsi_entry_filter(
-            rsi_1h_live=row.get("rsi_1h_live"),
-            rsi_1h_closed=row.get("rsi_1h_closed"),
-            rsi_4h_live=row.get("rsi_4h_live"),
-        )
-
-        fields = [
-            "RSI_ENTRY_DEBUG",
-            f"symbol={format_debug_value(row.get('symbol'))}",
-            f"exchange={format_debug_value(row.get('exchange'))}",
-            f"signal={format_debug_value(signal_level)}",
-            f"passed={format_debug_value(result.get('passed'))}",
-            f"reason={format_debug_value(result.get('reason'))}",
-            f"rsi_1h_live={format_debug_value(result.get('rsi_1h_live'))}",
-            f"rsi_1h_closed={format_debug_value(result.get('rsi_1h_closed'))}",
-            f"rsi_4h_live={format_debug_value(result.get('rsi_4h_live'))}",
-            f"thresholds=1H_live>={RSI_ENTRY_MIN_1H_LIVE}|1H_closed>={RSI_ENTRY_MIN_1H_CLOSED}|4H_live>={RSI_ENTRY_MIN_4H_LIVE}",
-        ]
-
-        print(" ".join(fields))
 
 
 def get_signal_rank(signal_level):

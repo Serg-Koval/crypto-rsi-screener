@@ -3,7 +3,7 @@ from tests.self_tests_classification import (
     run_open_levels_classification_self_tests,
     run_rsi_heat_gate_self_tests,
     run_overheat_context_self_tests,
-    run_rsi_entry_filter_self_tests,
+    run_rsi_4h_threshold_end_to_end_self_tests,
 )
 from tests.self_tests_factors import (
     run_oi_divergence_self_tests,
@@ -23,7 +23,7 @@ def run_all():
     run_open_levels_classification_self_tests()
     run_rsi_heat_gate_self_tests()
     run_rejection_self_tests()
-    run_rsi_entry_filter_self_tests()
+    run_rsi_4h_threshold_end_to_end_self_tests()
     run_overheat_context_self_tests()
     run_open_interest_self_tests()
     run_rsi_divergence_self_tests()

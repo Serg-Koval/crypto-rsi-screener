@@ -87,7 +87,7 @@ python tests/golden_test.py     # «золотий» регресійний те
 | `screener/factors/open_levels.py` | рівні відкриття D/W/M/Y і їхній контекст |
 | `screener/factors/rejection.py` | фактор rejection candle |
 | `screener/factors/analysis.py` | збирає п'ять факторів в один результат (`analyze_short_factors`) |
-| `screener/classification.py` | оцінки, дерево класифікації, RSI-фільтр входу, ранги сигналів |
+| `screener/classification.py` | оцінки, дерево класифікації, ранги сигналів |
 | `screener/bybit.py` | запити до Bybit через проксі, universe, prefilter, аналіз кандидата |
 | `screener/telegram.py` | облікові дані Telegram, розбиття довгих повідомлень, відправка |
 | `screener/report.py` | таблиці сигналів, текст Telegram-звіту, діагностичні логи |

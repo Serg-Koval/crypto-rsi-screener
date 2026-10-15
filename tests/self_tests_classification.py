@@ -5,7 +5,6 @@ from screener.classification import (
     classify_signal,
     classify_watch_signal,
     detect_overheat_watch_context,
-    evaluate_rsi_entry_filter,
 )
 from tests.cases import (
     make_classification_open_factor,
@@ -155,8 +154,8 @@ def run_rsi_heat_gate_self_tests():
         ("1H live 82 + closed 80 -> heat", 82.0, 80.0, 50.0, True),
         ("1H live 81.99 -> no heat", 81.99, 80.0, 50.0, False),
         ("1H live 82 + closed 79.99 -> no heat (both required)", 82.0, 79.99, 50.0, False),
-        ("4H live 80 -> heat", 50.0, 50.0, 80.0, True),
-        ("4H live 79.99 -> no heat", 50.0, 50.0, 79.99, False),
+        ("4H live 78 -> heat", 50.0, 50.0, 78.0, True),
+        ("4H live 77.99 -> no heat", 50.0, 50.0, 77.99, False),
     ]
 
     failed = 0
@@ -184,37 +183,6 @@ def run_rsi_heat_gate_self_tests():
     print(f"RSI HEAT GATE SELF TESTS PASSED: {len(cases)}/{len(cases)}")
 
 
-def run_rsi_entry_filter_self_tests():
-    print("\n" + "=" * 120)
-    print("RUNNING RSI ENTRY FILTER SELF TESTS")
-    print("SCRIPT VERSION:", SCRIPT_VERSION)
-    print("=" * 120)
-
-    tests = [
-        ("1H live passes", 65.0, 50.0, 50.0, True),
-        ("1H closed passes", 50.0, 65.0, 50.0, True),
-        ("4H live passes", 50.0, 50.0, 68.0, True),
-        ("weak RSI rejected", 64.9, 64.9, 67.9, False),
-    ]
-
-    failed = 0
-
-    for name, rsi_1h_live, rsi_1h_closed, rsi_4h_live, expected in tests:
-        result = evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
-        actual = bool(result.get("passed"))
-        ok = actual == expected
-        status_text = "PASS" if ok else "FAIL"
-        print(f"{status_text} | {name} | expected={expected} actual={actual} | reason={result.get('reason')}")
-
-        if not ok:
-            failed += 1
-
-    if failed > 0:
-        raise AssertionError(f"RSI entry filter self-tests failed: {failed}/{len(tests)}")
-
-    print(f"RSI ENTRY FILTER SELF TESTS PASSED: {len(tests)}/{len(tests)}")
-
-
 def run_overheat_context_self_tests():
     print("RUNNING OVERHEAT CONTEXT SELF TESTS")
     print("SCRIPT VERSION:", SCRIPT_VERSION)
@@ -229,6 +197,26 @@ def run_overheat_context_self_tests():
                 exact_volume_24h=10_000_000,
                 price_change_24h=16,
             ).get("is_overheat") is True,
+        ),
+        (
+            "4H live 78.0 passes (threshold is inclusive)",
+            detect_overheat_watch_context(
+                rsi_1h_live=66,
+                rsi_1h_closed=72,
+                rsi_4h_live=78.0,
+                exact_volume_24h=10_000_000,
+                price_change_24h=16,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "4H live 77.99 fails",
+            detect_overheat_watch_context(
+                rsi_1h_live=66,
+                rsi_1h_closed=72,
+                rsi_4h_live=77.99,
+                exact_volume_24h=10_000_000,
+                price_change_24h=16,
+            ).get("is_overheat") is False,
         ),
         (
             "1H RSI heat still passes",
@@ -264,3 +252,39 @@ def run_overheat_context_self_tests():
         raise AssertionError(f"Overheat context self-tests failed: {failed}/{len(tests)}")
 
     print(f"OVERHEAT CONTEXT SELF TESTS PASSED: {len(tests)}/{len(tests)}")
+
+
+def run_rsi_4h_threshold_end_to_end_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING 4H RSI 78 END-TO-END SELF TESTS")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    sweep = [make_classification_sweep_factor()]
+
+    # (name, price_change_24h, rsi_4h_live, short_factors, expected signal_level)
+    cases = [
+        ("pump >= 15%, 4H 78.0, no trigger -> OVERHEAT_WATCH", 16.0, 78.0, [], "OVERHEAT_WATCH"),
+        ("pump >= 15%, 4H 77.99, no trigger -> NO_SIGNAL", 16.0, 77.99, [], "NO_SIGNAL"),
+        ("sweep, pump < 15%, 4H 78.0 -> SHORT_WATCH", 10.0, 78.0, sweep, "SHORT_WATCH"),
+        ("sweep, pump < 15%, 4H 77.99 -> NO_SIGNAL", 10.0, 77.99, sweep, "NO_SIGNAL"),
+    ]
+
+    failed = 0
+
+    for name, price_change, rsi_4h, factors, expected in cases:
+        # 1H RSI stays below every 1H heat threshold.
+        result = classify_signal(
+            60.0, 60.0, rsi_4h, 10_000_000, 0, price_change,
+            short_factors=factors,
+        )
+        ok = result["signal_level"] == expected
+        print(f"{'PASS' if ok else 'FAIL'} | {name} | signal={result['signal_level']}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"4H RSI 78 end-to-end self-tests failed: {failed}/{len(cases)}")
+
+    print(f"4H RSI 78 END-TO-END SELF TESTS PASSED: {len(cases)}/{len(cases)}")
