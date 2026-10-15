@@ -27,9 +27,7 @@ sys.path.insert(0, ROOT)
 
 import tests.cases as cases  # noqa: E402
 from screener.classification import (  # noqa: E402
-    add_rsi_entry_filter_columns,
     classify_signal,
-    evaluate_rsi_entry_filter,
 )
 from screener.common import calculate_rsi  # noqa: E402
 from screener.config import RSI_PERIOD  # noqa: E402
@@ -559,75 +557,6 @@ def check_sweep_pairs(actual):
 
 
 # ------------------------------------------------------------
-# Threshold-boundary scenarios: RSI entry filter
-# (evaluate_rsi_entry_filter is the function used by add_rsi_entry_filter_columns
-# and by the shortlist; a value of 50 means "clearly below every threshold")
-# ------------------------------------------------------------
-
-RSI_ENTRY_LOW = 50.0
-
-
-def rsi_entry_record(rsi_1h_live, rsi_1h_closed, rsi_4h_live):
-    result = evaluate_rsi_entry_filter(rsi_1h_live, rsi_1h_closed, rsi_4h_live)
-    return {"passed": bool(result["passed"]), "reason": result["reason"]}
-
-
-def build_rsi_entry_scenarios():
-    scenarios = {}
-    thresholds = {"1h_live": 65.0, "1h_closed": 65.0, "4h_live": 68.0}
-
-    # Only one indicator moves; the other two stay far below their thresholds.
-    for name, threshold in thresholds.items():
-        offsets = [-8.0, -6.5, -5.0, -3.0, -1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0, 3.0, 5.0, 6.5, 8.0]
-
-        for offset in offsets:
-            value = round(threshold + offset, 1)
-            args = {"1h_live": RSI_ENTRY_LOW, "1h_closed": RSI_ENTRY_LOW, "4h_live": RSI_ENTRY_LOW}
-            args[name] = value
-            scenarios[f"rsi_entry/single/{name}={value}"] = rsi_entry_record(
-                args["1h_live"], args["1h_closed"], args["4h_live"]
-            )
-
-    # Every combination of "just below" / "just above" for the three thresholds
-    # (exactly one, two, three or none of them passes).
-    for live_up in (False, True):
-        for closed_up in (False, True):
-            for h4_up in (False, True):
-                live = 65.1 if live_up else 64.9
-                closed = 65.1 if closed_up else 64.9
-                h4 = 68.1 if h4_up else 67.9
-                key = f"rsi_entry/combo/live{'+' if live_up else '-'}|closed{'+' if closed_up else '-'}|4h{'+' if h4_up else '-'}"
-                scenarios[key] = rsi_entry_record(live, closed, h4)
-
-    # The same decision through the DataFrame helper used in the working flow.
-    frame = pd.DataFrame([
-        {"rsi_1h_live": 64.9, "rsi_1h_closed": 64.9, "rsi_4h_live": 67.9},
-        {"rsi_1h_live": 65.1, "rsi_1h_closed": 64.9, "rsi_4h_live": 67.9},
-        {"rsi_1h_live": 64.9, "rsi_1h_closed": 65.1, "rsi_4h_live": 67.9},
-        {"rsi_1h_live": 64.9, "rsi_1h_closed": 64.9, "rsi_4h_live": 68.1},
-    ])
-    out = add_rsi_entry_filter_columns(frame)
-    scenarios["rsi_entry/frame"] = out[["rsi_entry_passed", "rsi_entry_reason"]].to_dict(orient="records")
-
-    return scenarios
-
-
-def check_rsi_entry(actual):
-    """The three thresholds must be exactly where PROJECT_CONTEXT.md says."""
-    problems = []
-
-    for name, threshold in (("1h_live", 65.0), ("1h_closed", 65.0), ("4h_live", 68.0)):
-        below = actual.get(f"rsi_entry/single/{name}={round(threshold - 0.1, 1)}", {})
-        at = actual.get(f"rsi_entry/single/{name}={threshold}", {})
-        above = actual.get(f"rsi_entry/single/{name}={round(threshold + 0.1, 1)}", {})
-
-        if below.get("passed") is not False or at.get("passed") is not True or above.get("passed") is not True:
-            problems.append(f"rsi entry filter threshold {name}")
-
-    return problems
-
-
-# ------------------------------------------------------------
 # Run / compare
 # ------------------------------------------------------------
 
@@ -637,7 +566,6 @@ def build_results():
     results.update(build_random_scenarios())
     results.update(build_classification_grid(collect_factor_sets()))
     results.update(build_sweep_boundary_scenarios())
-    results.update(build_rsi_entry_scenarios())
     return clean(results)
 
 
@@ -700,7 +628,7 @@ def check_no_confirm_parity():
 def main():
     actual = build_results()
 
-    pair_problems = check_sweep_pairs(actual) + check_rsi_entry(actual)
+    pair_problems = check_sweep_pairs(actual)
 
     if pair_problems:
         print("GOLDEN TEST: гранична пара не розділяє результат (сценарій марний):")

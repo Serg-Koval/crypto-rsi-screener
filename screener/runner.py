@@ -8,9 +8,7 @@ from screener.config import (
     SEND_MESSAGE_IF_NO_SIGNALS,
 )
 from screener.classification import (
-    add_rsi_entry_filter_columns,
     get_signal_rank,
-    log_rsi_entry_debug,
 )
 from screener.bybit import (
     redact_proxy_details,
@@ -100,10 +98,8 @@ def run_screener():
 
     if df_all.empty:
         df_active = pd.DataFrame()
-        rsi_filtered_out_count = 0
     else:
         df_all["signal_rank"] = df_all["signal_level"].apply(get_signal_rank)
-        df_all = add_rsi_entry_filter_columns(df_all)
 
         df_all = df_all.sort_values(
             by=[
@@ -119,10 +115,7 @@ def run_screener():
             ascending=[False, False, False, False, False, False, False, False],
         ).reset_index(drop=True)
 
-        df_active_before_rsi_filter = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
-        log_rsi_entry_debug(df_active_before_rsi_filter)
-        rsi_filtered_out_count = len(df_active_before_rsi_filter[~df_active_before_rsi_filter["rsi_entry_passed"]])
-        df_active = df_active_before_rsi_filter[df_active_before_rsi_filter["rsi_entry_passed"]].copy()
+        df_active = df_all[df_all["signal_level"] != "NO_SIGNAL"].copy()
 
     print("\n" + "=" * 120)
     print("SUMMARY")
@@ -132,8 +125,7 @@ def run_screener():
     print("Bybit analyzed:", stats["analyzed"])
     print("Bybit errors:", stats["errors"])
     print("Bybit active:", stats["active"])
-    print("RSI entry filtered out:", rsi_filtered_out_count)
-    print("Total active signals after RSI entry filter:", len(df_active))
+    print("Total active signals:", len(df_active))
 
     df_active_output = prepare_active_output_table(df_active)
     grouped_signals = prepare_grouped_active_signals(df_active, max_groups=FINAL_TOP_N)
