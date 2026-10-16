@@ -22,7 +22,6 @@ from screener.config import (
     CANDLE_LIMIT_1D,
     CANDLE_LIMIT_1H,
     CANDLE_LIMIT_4H,
-    MIN_PRICE_CHANGE_24H,
     MIN_VOLUME_USD_24H,
     PRE_FILTER_TOP_N,
     REQUEST_DELAY_SECONDS,
@@ -243,10 +242,7 @@ def bybit_build_market_universe():
 def bybit_prefilter_candidates(df_market):
     df = df_market.copy()
 
-    df = df[
-        (df["price_change_24h_percent"] >= MIN_PRICE_CHANGE_24H)
-        & (df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H)
-    ].copy()
+    df = df[df["volume_usd_24h_est"] >= MIN_VOLUME_USD_24H].copy()
 
     df = df.sort_values(
         by=["price_change_24h_percent", "volume_usd_24h_est"],

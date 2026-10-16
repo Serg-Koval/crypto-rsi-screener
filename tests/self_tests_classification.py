@@ -148,8 +148,8 @@ def run_rsi_heat_gate_self_tests():
     print("SCRIPT VERSION:", SCRIPT_VERSION)
     print("=" * 120)
 
-    # (name, 1H live, 1H closed, 4H live, expected has_rsi_heat). Growth stays
-    # below 15% so only the RSI part of the heat context is exercised.
+    # (name, 1H live, 1H closed, 4H live, expected has_rsi_heat). Growth is not a
+    # threshold any more; with volume 10M the heat context equals the RSI heat.
     cases = [
         ("1H live 82 + closed 80 -> heat", 82.0, 80.0, 50.0, True),
         ("1H live 81.99 -> no heat", 81.99, 80.0, 50.0, False),
@@ -169,7 +169,7 @@ def run_rsi_heat_gate_self_tests():
         expected_signal = "SHORT_WATCH" if expected_heat else "NO_SIGNAL"
         ok = (
             scores["has_rsi_heat"] is expected_heat
-            and scores["has_overheat_context"] is False
+            and scores["has_overheat_context"] is expected_heat
             and result["signal_level"] == expected_signal
         )
         print(f"{'PASS' if ok else 'FAIL'} | {name} | has_rsi_heat={scores['has_rsi_heat']} signal={result['signal_level']}")
@@ -229,13 +229,63 @@ def run_overheat_context_self_tests():
             ).get("is_overheat") is True,
         ),
         (
-            "RSI heat blocked without pump context",
+            "RSI heat + volume passes at 9% growth",
             detect_overheat_watch_context(
                 rsi_1h_live=83,
                 rsi_1h_closed=81,
                 rsi_4h_live=82,
                 exact_volume_24h=10_000_000,
                 price_change_24h=9,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "RSI heat + volume passes at 0% growth",
+            detect_overheat_watch_context(
+                rsi_1h_live=83,
+                rsi_1h_closed=81,
+                rsi_4h_live=82,
+                exact_volume_24h=10_000_000,
+                price_change_24h=0,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "RSI heat + volume passes at -3% growth",
+            detect_overheat_watch_context(
+                rsi_1h_live=83,
+                rsi_1h_closed=81,
+                rsi_4h_live=82,
+                exact_volume_24h=10_000_000,
+                price_change_24h=-3,
+            ).get("is_overheat") is True,
+        ),
+        (
+            "RSI heat with volume 4.99M fails",
+            detect_overheat_watch_context(
+                rsi_1h_live=83,
+                rsi_1h_closed=81,
+                rsi_4h_live=82,
+                exact_volume_24h=4_990_000,
+                price_change_24h=20,
+            ).get("is_overheat") is False,
+        ),
+        (
+            "No RSI heat (4H 77.99, 1H below) fails at 30% growth",
+            detect_overheat_watch_context(
+                rsi_1h_live=70,
+                rsi_1h_closed=70,
+                rsi_4h_live=77.99,
+                exact_volume_24h=10_000_000,
+                price_change_24h=30,
+            ).get("is_overheat") is False,
+        ),
+        (
+            "No RSI heat fails at -3% growth",
+            detect_overheat_watch_context(
+                rsi_1h_live=70,
+                rsi_1h_closed=70,
+                rsi_4h_live=77.99,
+                exact_volume_24h=10_000_000,
+                price_change_24h=-3,
             ).get("is_overheat") is False,
         ),
     ]
@@ -288,3 +338,42 @@ def run_rsi_4h_threshold_end_to_end_self_tests():
         raise AssertionError(f"4H RSI 78 end-to-end self-tests failed: {failed}/{len(cases)}")
 
     print(f"4H RSI 78 END-TO-END SELF TESTS PASSED: {len(cases)}/{len(cases)}")
+
+
+def run_qusdt_style_end_to_end_self_tests():
+    print("\n" + "=" * 120)
+    print("RUNNING QUSDT-STYLE END-TO-END SELF TESTS (growth is not a threshold)")
+    print("SCRIPT VERSION:", SCRIPT_VERSION)
+    print("=" * 120)
+
+    sweep = [make_classification_sweep_factor()]
+    divergence = [make_classification_rsi_divergence_factor()]
+    both = divergence + sweep
+
+    # (name, rsi_4h_live, volume, factors, expected signal_level)
+    cases = [
+        ("4H 83.1, volume 19.16M, no factors -> OVERHEAT_WATCH", 83.1, 19_160_000, [], "OVERHEAT_WATCH"),
+        ("4H 77.99 -> NO_SIGNAL", 77.99, 19_160_000, [], "NO_SIGNAL"),
+        ("volume 4.99M -> NO_SIGNAL", 83.1, 4_990_000, [], "NO_SIGNAL"),
+        ("confirmed divergence -> SHORT_WATCH", 83.1, 19_160_000, divergence, "SHORT_WATCH"),
+        ("confirmed sweep -> SHORT_WATCH", 83.1, 19_160_000, sweep, "SHORT_WATCH"),
+        ("divergence + sweep -> HIGH_PRIORITY_SHORT_WATCH", 83.1, 19_160_000, both, "HIGH_PRIORITY_SHORT_WATCH"),
+    ]
+
+    failed = 0
+
+    for name, rsi_4h, volume, factors, expected in cases:
+        result = classify_signal(
+            64.6, 63.2, rsi_4h, volume, 0, 5.7,
+            short_factors=factors,
+        )
+        ok = result["signal_level"] == expected
+        print(f"{'PASS' if ok else 'FAIL'} | {name} | signal={result['signal_level']}")
+
+        if not ok:
+            failed += 1
+
+    if failed > 0:
+        raise AssertionError(f"QUSDT-style end-to-end self-tests failed: {failed}/{len(cases)}")
+
+    print(f"QUSDT-STYLE END-TO-END SELF TESTS PASSED: {len(cases)}/{len(cases)}")

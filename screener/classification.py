@@ -11,7 +11,6 @@ from screener.config import (
     EXTREME_PUMP_RSI_4H_LIVE,
     MIN_VOLUME_USD_24H,
     OVERHEAT_WATCH_MIN_VOLUME_USD_24H,
-    OVERHEAT_WATCH_PRICE_CHANGE_24H,
     OVERHEAT_WATCH_RSI_1H_CLOSED,
     OVERHEAT_WATCH_RSI_1H_LIVE,
     OVERHEAT_WATCH_RSI_4H_LIVE,
@@ -29,7 +28,7 @@ def detect_overheat_watch_context(
     rsi_1h_live,
     rsi_1h_closed,
     exact_volume_24h,
-    price_change_24h,
+    price_change_24h,  # kept for callers; no longer affects the overheat status
     rsi_4h_live=None,
 ):
     """Detect pump + RSI heat context for watchlist visibility.
@@ -44,7 +43,6 @@ def detect_overheat_watch_context(
     rsi_1h_closed_value = safe_float(rsi_1h_closed)
     rsi_4h_live_value = safe_float(rsi_4h_live)
     volume_24h_value = safe_float(exact_volume_24h)
-    price_change_24h_value = safe_float(price_change_24h)
 
     has_1h_heat = (
         rsi_1h_live_value >= OVERHEAT_WATCH_RSI_1H_LIVE
@@ -54,10 +52,6 @@ def detect_overheat_watch_context(
     has_rsi_heat = bool(has_1h_heat or has_4h_heat)
 
     common_checks = [
-        (
-            price_change_24h_value >= OVERHEAT_WATCH_PRICE_CHANGE_24H,
-            f"24h change >= {OVERHEAT_WATCH_PRICE_CHANGE_24H}%",
-        ),
         (
             volume_24h_value >= OVERHEAT_WATCH_MIN_VOLUME_USD_24H,
             f"24h volume >= {format_large_number(OVERHEAT_WATCH_MIN_VOLUME_USD_24H)}",

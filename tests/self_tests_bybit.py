@@ -192,6 +192,25 @@ def run_bybit_self_tests():
         df_universe = bybit_build_market_universe()
         df_pre = bybit_prefilter_candidates(df_universe)
 
+    # Prefilter on a hand-made frame: growth is only a sort key, volume is the filter.
+    def make_pre(rows):
+        return pd.DataFrame([
+            {"symbol": s, "price": 1.0, "price_change_24h_percent": ch, "volume_usd_24h_est": vol}
+            for s, ch, vol in rows
+        ])
+
+    pre_small = bybit_prefilter_candidates(make_pre([
+        ("LOWUSDT", 3.0, 6_000_000.0),
+        ("NEGUSDT", -2.0, 6_000_000.0),
+        ("THINUSDT", 50.0, 4_990_000.0),
+        ("EDGEUSDT", 1.0, 5_000_000.0),
+        ("TIEAUSDT", 7.0, 8_000_000.0),
+        ("TIEBUSDT", 7.0, 9_000_000.0),
+    ]))
+    pre_many = bybit_prefilter_candidates(make_pre(
+        [(f"C{i:02d}USDT", float(i), 6_000_000.0) for i in range(45)]
+    ))
+
     # Data quality / error accounting.
     def run_with_errors(failing_symbols):
         candidates = pd.DataFrame({
@@ -299,7 +318,15 @@ def run_bybit_self_tests():
         ("tickers: 24h change ratio -> percent", abs(float(df_tick.loc[df_tick["symbol"] == "AAAUSDT", "price_change_24h_percent"].iloc[0]) - 12.73) < 1e-9),
         ("tickers: turnover is USDT volume", float(df_tick.loc[df_tick["symbol"] == "AAAUSDT", "volume_usd_24h_est"].iloc[0]) == 74340000.0),
         ("universe: dated futures are excluded", "BBBUSDT" not in list(df_universe["symbol"])),
-        ("prefilter: change >= 8% and volume >= 5M", list(df_pre["symbol"]) == ["AAAUSDT"]),
+        ("prefilter: volume >= 5M only, sorted by growth desc", list(df_pre["symbol"]) == ["AAAUSDT", "EEEUSDT"]),
+        ("prefilter: +3% with volume >= 5M passes", "LOWUSDT" in list(pre_small["symbol"])),
+        ("prefilter: -2% with volume >= 5M passes", "NEGUSDT" in list(pre_small["symbol"])),
+        ("prefilter: volume 4.99M fails even with +50%", "THINUSDT" not in list(pre_small["symbol"])),
+        ("prefilter: volume exactly 5M passes", "EDGEUSDT" in list(pre_small["symbol"])),
+        ("prefilter: sort by growth desc, then volume desc",
+            list(pre_small["symbol"]) == ["TIEBUSDT", "TIEAUSDT", "LOWUSDT", "EDGEUSDT", "NEGUSDT"]),
+        ("prefilter: PRE_FILTER_TOP_N limit applies (45 -> 40)",
+            len(pre_many) == 40 and pre_many["symbol"].iloc[0] == "C44USDT" and pre_many["symbol"].iloc[-1] == "C05USDT"),
 
         # --- full candidate pipeline on fake API data
         ("candidate: exchange and provider are Bybit", candidate["exchange"] == "Bybit" and candidate["provider"] == "Bybit"),
