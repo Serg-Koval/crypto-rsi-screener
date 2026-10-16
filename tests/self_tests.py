@@ -1,4 +1,4 @@
-from tests.self_tests_bybit import run_bybit_self_tests
+from tests.self_tests_bybit import run_bybit_self_tests, run_tradfi_filter_self_tests
 from tests.self_tests_classification import (
     run_open_levels_classification_self_tests,
     run_rsi_heat_gate_self_tests,
@@ -29,5 +29,6 @@ def run_all():
     run_rsi_divergence_self_tests()
     run_oi_divergence_self_tests()
     run_bybit_self_tests()
+    run_tradfi_filter_self_tests()
     run_threshold_self_tests()
     run_security_self_tests()
