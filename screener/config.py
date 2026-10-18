@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "bybit-proxy-v1-20261016-r37_21"
+SCRIPT_VERSION = "bybit-proxy-v1-20261017-r37_22"
 
 RSI_PERIOD = 14
 
@@ -131,8 +131,9 @@ BYBIT_CATEGORY = "linear"
 BYBIT_CONTRACT_TYPE = "LinearPerpetual"
 BYBIT_QUOTE_COIN = "USDT"
 BYBIT_STATUS = "Trading"
-# TradFi instruments (stock, ETF, commodity) have a non-empty symbolType; crypto has "".
-BYBIT_CRYPTO_SYMBOL_TYPE = ""
+# TradFi instruments; crypto has "" or "innovation" (Innovation Zone). Unknown new
+# types are kept as crypto, so extend this list when Bybit adds a new TradFi type.
+BYBIT_TRADFI_SYMBOL_TYPES = ("stock", "etf", "commodity")
 BYBIT_INTERVALS = {"1H": "60", "4H": "240", "1D": "D"}
 BYBIT_OI_INTERVAL = "1h"
 BYBIT_OI_HISTORY_LIMIT = 200

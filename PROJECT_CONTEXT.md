@@ -40,7 +40,7 @@ Cloudflare Worker (ladovka-screener-dispatcher)
 
 - Код працює на **Bybit** (USDT-перпетуали, категорія `linear`) через проксі у Worker. Один провайдер, один символ у звіті один раз. Код попередніх бірж видалено. `main.py` — лише точка входу, логіка в пакеті `screener/` (див. «Карту модулів» нижче).
 - Міграція на Bybit завершена (етапи 1–5 з `bybit-migration-task-free.md`). Логіка аналізу при міграції не змінювалась; це перевірено «золотим» тестом.
-- Версія: `SCRIPT_VERSION` у `screener/config.py` (на 2026-10-16: `bybit-proxy-v1-20261016-r37_21`).
+- Версія: `SCRIPT_VERSION` у `screener/config.py` (на 2026-10-17: `bybit-proxy-v1-20261017-r37_22`).
 - Допоміжні файли: `tests/golden_test.py` (+ `tests/golden_expected.json`, «золотий» регресійний тест), `tests/cases.py` (синтетичні сценарії `make_*`), `tests/self_tests.py` і `tests/self_tests_*.py` (самотести). Старі прототипи й одноразові тести видалено.
 - `README.md` описує Bybit, проксі, Placement EU2, секрети та запуск.
 - Self-тести: `python main.py --self-test` (запускає `tests/self_tests.py::run_all()`; sweep, open levels, класифікація, rejection, overheat, OI, RSI-дивергенція, OI-дивергенція, Bybit: конфіг і запити, нормалізація свічок, фільтри universe, повний шлях кандидата, лічильник помилок). Золотий тест: `python tests/golden_test.py` має показувати «без відмінностей».
@@ -78,7 +78,7 @@ telegram ← report ← runner
 
 ## 4. Конвеєр аналізу (по кроках)
 
-1. **Universe.** Усі USDT-перпетуали Bybit (крипта): `instruments-info` (лишаються `LinearPerpetual`, `USDT`, `Trading` і `symbolType` порожній, тобто лише крипта; TradFi-інструменти Bybit (stock, ETF, commodity) відсікаються; якщо колонки `symbolType` у відповіді немає, фільтр пропускається з попередженням у лозі; r37_20) + `tickers`. Зміна ціни за 24 год береться з тікера (`price24hPcnt` × 100), обіг з `turnover24h` (USDT).
+1. **Universe.** Усі USDT-перпетуали Bybit (крипта): `instruments-info` (лишаються `LinearPerpetual`, `USDT`, `Trading`; відсікаються лише TradFi-інструменти Bybit: `symbolType` = stock, ETF, commodity (список у `BYBIT_TRADFI_SYMBOL_TYPES`, регістр і пробіли не враховуються); крипта має порожній `symbolType` або `innovation` (Інноваційна зона); невідомі нові типи лишаються як крипта; якщо колонки `symbolType` у відповіді немає, фільтр пропускається з попередженням у лозі; r37_22 (у r37_20 був білий список, який помилково відсікав `innovation`)) + `tickers`. Зміна ціни за 24 год береться з тікера (`price24hPcnt` × 100), обіг з `turnover24h` (USDT).
 2. **Prefilter.** Залишаються монети з обігом ≥ 5 млн USD (оцінка з тікера); ріст порогом не є (r37_21). Сортування: за зміною за 24 год (спадання), потім за обігом. Беруться перші 40 (`PRE_FILTER_TOP_N`).
 3. **Дані для кожного кандидата** (4 запити послідовно): свічки 1H (500), 4H (500), 1D (300) і історія Open Interest (крок 1H, до 200 точок; поточний OI = остання точка історії). Між кандидатами пауза `REQUEST_DELAY_SECONDS = 0.15` с. Паралельних запитів немає.
 4. **RSI.** Wilder RSI, період 14, за ціною закриття; сумісний із TradingView (стартова точка: середнє перших 14 значень, далі згладжування Вайлдера).

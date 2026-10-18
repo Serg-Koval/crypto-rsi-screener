@@ -412,6 +412,11 @@ def run_tradfi_filter_self_tests():
         inst("BSPUSDT", "stock"),
         inst("XAUUSDT", "commodity"),
         inst("NEWUSDT", "index"),
+        inst("QUSDT", "innovation"),
+        inst("LOWETFUSDT", "etf"),
+        inst("MIXSTOCKUSDT", "Stock"),
+        inst("PADCOMMUSDT", " COMMODITY "),
+        inst("UPPERINNOVUSDT", "Innovation"),
         row_missing_key,
         row_null,
         inst("SPACEUSDT", "  "),
@@ -429,10 +434,11 @@ def run_tradfi_filter_self_tests():
     _, log_with_column = convert(mixed)
 
     # End to end: same numbers for a TradFi and a crypto symbol.
-    instruments = [inst("TRADFIUSDT", "stock"), inst("CRYPTOUSDT", "")]
+    instruments = [inst("TRADFIUSDT", "stock"), inst("CRYPTOUSDT", ""), inst("INNOVUSDT", "innovation")]
     tickers = [
         {"symbol": "TRADFIUSDT", "lastPrice": "10", "price24hPcnt": "0.30", "turnover24h": "90000000"},
         {"symbol": "CRYPTOUSDT", "lastPrice": "10", "price24hPcnt": "0.30", "turnover24h": "90000000"},
+        {"symbol": "INNOVUSDT", "lastPrice": "10", "price24hPcnt": "0.30", "turnover24h": "90000000"},
     ]
     saved = (bybit_module.bybit_get_instruments, bybit_module.bybit_get_tickers)
     bybit_module.bybit_get_instruments = lambda: instruments
@@ -446,20 +452,28 @@ def run_tradfi_filter_self_tests():
 
     tests = [
         ("empty symbolType is kept", "BTCUSDT" in kept(mixed)),
-        ("stock / ETF / commodity / new type are dropped",
-            not {"SOXSUSDT", "BSPUSDT", "XAUUSDT", "NEWUSDT"} & set(kept(mixed))),
+        ("stock / ETF / commodity are dropped",
+            not {"SOXSUSDT", "BSPUSDT", "XAUUSDT"} & set(kept(mixed))),
+        ("unknown new type is kept", "NEWUSDT" in kept(mixed)),
+        ("innovation (crypto) is kept", "QUSDT" in kept(mixed)),
+        ("type match ignores case and surrounding spaces",
+            not {"LOWETFUSDT", "MIXSTOCKUSDT", "PADCOMMUSDT"} & set(kept(mixed))),
+        ("Innovation in other case is kept", "UPPERINNOVUSDT" in kept(mixed)),
         ("null or missing symbolType in a row (column present) is kept as crypto",
             {"MISSINGUSDT", "NULLUSDT"} <= set(kept(mixed))),
         ("whitespace-only symbolType is kept", "SPACEUSDT" in kept(mixed)),
         ("TradFi with status Closed is dropped", "TRADFICLOSEDUSDT" not in kept(mixed)),
         ("crypto symbolType but LinearFutures is dropped", "CRYPTOFUTURESUSDT" not in kept(mixed)),
-        ("exact kept set", kept(mixed) == ["BTCUSDT", "MISSINGUSDT", "NULLUSDT", "SPACEUSDT"]),
+        ("exact kept set", kept(mixed) == [
+            "BTCUSDT", "MISSINGUSDT", "NEWUSDT", "NULLUSDT", "QUSDT", "SPACEUSDT", "UPPERINNOVUSDT",
+        ]),
         ("no warning when the column exists", warning not in log_with_column),
         ("no symbolType column: nothing dropped, no exception", df_no_column["symbol"].tolist() == ["AAAUSDT", "BBBUSDT"]),
         ("no symbolType column: exactly one warning line", log_no_column.count(warning) == 1 and log_no_column.strip() == warning),
         ("empty instruments still returns an empty frame", convert([])[0].empty),
-        ("universe: TradFi symbol is not in df_universe", df_universe["symbol"].tolist() == ["CRYPTOUSDT"]),
-        ("prefilter: TradFi symbol is not a candidate, crypto is", df_pre["symbol"].tolist() == ["CRYPTOUSDT"]),
+        ("universe: TradFi symbol is not in df_universe", df_universe["symbol"].tolist() == ["CRYPTOUSDT", "INNOVUSDT"]),
+        ("prefilter: TradFi symbol is not a candidate, crypto and innovation are",
+            df_pre["symbol"].tolist() == ["CRYPTOUSDT", "INNOVUSDT"]),
     ]
 
     failed = 0
