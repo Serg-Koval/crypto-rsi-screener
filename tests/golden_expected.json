@@ -27310,7 +27310,7 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "4H RSI bearish | 1H RSI bearish",
+     "detail": "1H RSI bearish",
      "key": "rsi_divergence",
      "points": 0,
      "status": "confirmed"
@@ -29025,7 +29025,7 @@
  },
  "sweep_boundary/age/bars/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29046,10 +29046,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29137,7 +29137,7 @@
  },
  "sweep_boundary/base_confirmed": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29158,10 +29158,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29193,7 +29193,7 @@
  },
  "sweep_boundary/break/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29214,10 +29214,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish equal high",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29249,7 +29249,7 @@
  },
  "sweep_boundary/break/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -29270,10 +29270,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish equal high",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29305,7 +29305,7 @@
  },
  "sweep_boundary/break/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29326,10 +29326,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish equal high",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29361,7 +29361,7 @@
  },
  "sweep_boundary/break/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -29382,10 +29382,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish equal high",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29865,7 +29865,7 @@
  },
  "sweep_boundary/live_invalidation/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29886,10 +29886,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29921,7 +29921,7 @@
  },
  "sweep_boundary/live_invalidation/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -29942,10 +29942,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -29977,7 +29977,7 @@
  },
  "sweep_boundary/live_invalidation/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -29998,10 +29998,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30033,7 +30033,7 @@
  },
  "sweep_boundary/live_invalidation/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30054,10 +30054,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30089,7 +30089,7 @@
  },
  "sweep_boundary/prior_close_reclaim/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30110,10 +30110,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30145,7 +30145,7 @@
  },
  "sweep_boundary/prior_close_reclaim/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30166,10 +30166,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30201,7 +30201,7 @@
  },
  "sweep_boundary/prior_close_reclaim/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30222,10 +30222,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30257,7 +30257,7 @@
  },
  "sweep_boundary/prior_close_reclaim/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30278,10 +30278,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30313,7 +30313,7 @@
  },
  "sweep_boundary/prior_high_break/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30334,10 +30334,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30369,7 +30369,7 @@
  },
  "sweep_boundary/prior_high_break/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30390,10 +30390,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30425,7 +30425,7 @@
  },
  "sweep_boundary/prior_high_break/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30446,10 +30446,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30481,7 +30481,7 @@
  },
  "sweep_boundary/prior_high_break/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30502,10 +30502,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30537,7 +30537,7 @@
  },
  "sweep_boundary/prominence/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30558,10 +30558,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30593,7 +30593,7 @@
  },
  "sweep_boundary/prominence/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30614,10 +30614,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30649,7 +30649,7 @@
  },
  "sweep_boundary/prominence/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30670,10 +30670,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30705,7 +30705,7 @@
  },
  "sweep_boundary/prominence/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30726,10 +30726,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30761,7 +30761,7 @@
  },
  "sweep_boundary/reaction/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30782,10 +30782,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30817,7 +30817,7 @@
  },
  "sweep_boundary/reaction/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30838,10 +30838,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30873,7 +30873,7 @@
  },
  "sweep_boundary/reaction/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -30894,10 +30894,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30929,7 +30929,7 @@
  },
  "sweep_boundary/reaction/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -30950,10 +30950,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -30985,7 +30985,7 @@
  },
  "sweep_boundary/wick/tight/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -31006,10 +31006,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -31041,7 +31041,7 @@
  },
  "sweep_boundary/wick/tight/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -31062,10 +31062,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -31097,7 +31097,7 @@
  },
  "sweep_boundary/wick/wide/above": {
   "analysis": {
-   "confirmed_count": 2,
+   "confirmed_count": 1,
    "factors": [
     {
      "detail": "1H high 100.00 swept, close below",
@@ -31118,10 +31118,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",
@@ -31153,7 +31153,7 @@
  },
  "sweep_boundary/wick/wide/below": {
   "analysis": {
-   "confirmed_count": 1,
+   "confirmed_count": 0,
    "factors": [
     {
      "detail": "no confirmed 1H/4H liquidity sweep",
@@ -31174,10 +31174,10 @@
      "status": "not_confirmed"
     },
     {
-     "detail": "1H RSI bearish",
+     "detail": "none",
      "key": "rsi_divergence",
      "points": 0,
-     "status": "confirmed"
+     "status": "not_confirmed"
     },
     {
      "detail": "OI history unavailable",

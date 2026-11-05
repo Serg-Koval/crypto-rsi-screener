@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-SCRIPT_VERSION = "bybit-proxy-v1-20261017-r37_22"
+SCRIPT_VERSION = "bybit-proxy-v1-20261105-r37_23"
 
 RSI_PERIOD = 14
 
