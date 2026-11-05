@@ -506,14 +506,58 @@ def run_rsi_divergence_self_tests():
         df.loc[17, "rsi"] = 82.0
         return df
 
+    def with_rsi(df, updates):
+        out = df.copy()
+        for idx, value in updates.items():
+            out.loc[idx, "rsi"] = float(value)
+        return out
+
+    def status_of(df):
+        return detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H").get("status")
+
+    def make_elsa_like_df():
+        # Prior swing high (idx 6, RSI 79.4); peak candle A (idx 17, RSI 92);
+        # next candle B (idx 18) has a slightly higher high but RSI 75.8.
+        df = make_divergence_df()
+        df.loc[6, "high"] = 115.0
+        df.loc[17, "high"] = 122.0
+        df.loc[18, "high"] = 123.5
+        df.loc[19, "high"] = 119.0
+        df.loc[6, "rsi"] = 79.4
+        df.loc[17, "rsi"] = 92.0
+        df.loc[18, "rsi"] = 75.8
+        return df
+
+    def make_truncated_right_df():
+        # Candidate (idx 24 after padding) is the last closed candle: the right
+        # side of the RSI window is clipped to the data.
+        df = make_divergence_df()
+        pad = df.iloc[:1].copy()
+        pad["high"] = 90.0
+        pad["rsi"] = 40.0
+        df = pd.concat([pad] * 6 + [df], ignore_index=True)
+        df.loc[24, "high"] = 125.0
+        df.loc[24, "rsi"] = 60.0
+        df.loc[25:, "confirm"] = 0
+        return df
+
     div_df = make_divergence_df()
     no_div_df = make_no_divergence_df()
+    equal_high_df = make_divergence_df()
+    equal_high_df.loc[17, "high"] = 115.0
+    equal_high_df.loc[16, "high"] = 112.0
 
     tests = [
         ("1H bearish divergence detected", lambda: detect_rsi_bearish_divergence_for_timeframe(div_df, timeframe="1H").get("status") == "confirmed"),
         ("1H no divergence when RSI confirms high", lambda: detect_rsi_bearish_divergence_for_timeframe(no_div_df, timeframe="1H").get("status") == "not_confirmed"),
         ("combined factor reports 1H divergence", lambda: detect_rsi_bearish_divergence(df_1h=div_df, df_4h=no_div_df).get("status") == "confirmed"),
         ("combined factor reports no divergence", lambda: detect_rsi_bearish_divergence(df_1h=no_div_df, df_4h=no_div_df).get("status") == "not_confirmed"),
+        ("ELSA-like neighbouring RSI peak is not a divergence", lambda: status_of(make_elsa_like_df()) == "not_confirmed"),
+        ("ELSA-like candidate RSI is the peak RSI", lambda: detect_rsi_bearish_divergence_for_timeframe(make_elsa_like_df(), "1H").get("candidate_rsi_high") == 92.0),
+        ("equal-high divergence stays confirmed", lambda: status_of(equal_high_df) == "confirmed"),
+        ("higher RSI 3 candles away (outside window) does not save divergence", lambda: status_of(with_rsi(div_df, {14: 90})) == "confirmed" and status_of(with_rsi(div_df, {20: 90})) == "confirmed"),
+        ("higher RSI 2 candles away (inside window) saves divergence", lambda: status_of(with_rsi(div_df, {15: 90})) == "not_confirmed" and status_of(with_rsi(div_df, {19: 90})) == "not_confirmed"),
+        ("candidate on last closed candle clips window without error", lambda: status_of(make_truncated_right_df()) == "confirmed"),
     ]
 
     failed = 0

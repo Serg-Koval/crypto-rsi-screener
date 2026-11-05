@@ -156,6 +156,25 @@ def price_high_relation(candidate_high, prior_high, min_hh_pct=None, equal_toler
     return "none"
 
 
+def get_peak_rsi_around(rsis, center_index):
+    """
+    Return the max RSI around a price peak (NaN ignored), or NaN if none.
+
+    The window (LEFT bars before, RIGHT bars after, clipped to the data) is
+    intentionally the same as the swing high window: the RSI peak and the price
+    peak can sit on neighbouring candles.
+    """
+
+    start = max(0, int(center_index) - int(RSI_DIVERGENCE_SWING_LEFT_BARS))
+    end = min(len(rsis), int(center_index) + int(RSI_DIVERGENCE_SWING_RIGHT_BARS) + 1)
+    window_values = rsis.iloc[start:end].dropna()
+
+    if window_values.empty:
+        return np.nan
+
+    return float(window_values.max())
+
+
 def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
     """
     Detect bearish RSI divergence:
@@ -203,7 +222,8 @@ def detect_rsi_bearish_divergence_for_timeframe(df, timeframe="1H"):
 
     candidate_local_index = int(recent_slice.idxmax())
     candidate_high = safe_float(highs.iloc[candidate_local_index], default=np.nan)
-    candidate_rsi = safe_float(rsis.iloc[candidate_local_index], default=np.nan)
+    # "candidate_rsi_high" in results means RSI of the peak: max RSI around the price high.
+    candidate_rsi = safe_float(get_peak_rsi_around(rsis, candidate_local_index), default=np.nan)
 
     if pd.isna(candidate_high) or pd.isna(candidate_rsi):
         return {"status": "not_enough_data", "timeframe": str(timeframe), "detail": "recent high/RSI unavailable"}
